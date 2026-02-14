@@ -711,6 +711,11 @@ export class WhaleScanner {
         const concurrency = this.scannerConfig.parallelFetchBatch || 8;
         this.state.currentMarket = `Scanning ${newMarkets.length} markets (${concurrency}x parallel)…`;
 
+        /* Track completed count for live progress updates */
+        let completedInPage = 0;
+        let errorsInPage = 0;
+        let lastPageError: unknown = null;
+
         const processMarket = async (market: GammaMarket): Promise<number> => {
           if (this.state.status !== 'scanning') return 0;
           await this.semaphore.acquire();
@@ -718,7 +723,22 @@ export class WhaleScanner {
             const trades = await this.fetchMarketTrades(market.conditionId);
             const currentPrices = this.buildCurrentPriceMap(market);
             this.aggregateTrades(this.globalAgg, trades, market.conditionId, market.question, currentPrices);
+
+            /* ── Live progress: update state as each market completes ── */
+            completedInPage++;
+            marketsProcessedThisBatch++;
+            this.state.marketsScanned = marketsProcessedThisBatch;
+            this.state.scanProgress = parseFloat(
+              ((marketsProcessedThisBatch / Math.max(totalQualifying, 1)) * 90).toFixed(1),
+            );
+            this.state.currentMarket = `Scanning… ${marketsProcessedThisBatch}/${totalQualifying} markets (${concurrency}x parallel)`;
+            this.perfTradesFetched += trades.length;
+
             return trades.length;
+          } catch (err) {
+            errorsInPage++;
+            lastPageError = err;
+            throw err;
           } finally {
             this.semaphore.release();
           }
@@ -727,11 +747,11 @@ export class WhaleScanner {
         /* Fire all market fetches concurrently (semaphore limits actual parallelism) */
         const results = await Promise.allSettled(newMarkets.map((m) => processMarket(m)));
 
+        /* Re-count errors from allSettled (processMarket already incremented marketsProcessedThisBatch on success) */
         let batchErrors = 0;
         let lastError: unknown = null;
         for (const r of results) {
-          if (r.status === 'fulfilled') marketsProcessedThisBatch++;
-          else { batchErrors++; lastError = r.reason; }
+          if (r.status === 'rejected') { batchErrors++; lastError = r.reason; }
         }
 
         /* If every single market in this page failed, propagate the error */
@@ -739,10 +759,10 @@ export class WhaleScanner {
           throw lastError instanceof Error ? lastError : new Error(String(lastError));
         }
 
-        /* ── Incremental stat updates ── */
-        this.state.marketsScanned = this.scannedMarketIds.size;
+        /* ── Final stat update after page completes ── */
+        this.state.marketsScanned = marketsProcessedThisBatch;
         this.state.scanProgress = parseFloat(
-          ((this.scannedMarketIds.size / Math.max(totalQualifying, 1)) * 90).toFixed(1),
+          ((marketsProcessedThisBatch / Math.max(totalQualifying, 1)) * 90).toFixed(1),
         );
 
         /* ── Periodically rebuild profiles so results appear live ── */
@@ -1902,6 +1922,7 @@ export class WhaleScanner {
     }
 
     /* Backfill markets concurrently using semaphore */
+    let backfillCompleted = 0;
     const backfillOne = async (market: GammaMarket): Promise<void> => {
       if (!this.state.enabled) return;
       await this.semaphore.acquire();
@@ -1955,6 +1976,12 @@ export class WhaleScanner {
             this.aggregateTrades(this.globalAgg, r.value, market.conditionId, market.question, currentPrices);
           }
         }
+
+        /* ── Live backfill progress ── */
+        backfillCompleted++;
+        this.state.currentMarket = `Backfill ${backfillCompleted}/${topMarkets.length} markets (${days}d history)…`;
+        this.state.scanProgress = parseFloat(((backfillCompleted / topMarkets.length) * 50).toFixed(1));
+        this.state.marketsScanned = backfillCompleted;
       } finally {
         this.semaphore.release();
       }
