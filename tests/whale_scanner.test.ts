@@ -296,6 +296,43 @@ describe('WhaleScanner — triggerScan (with mock fetch)', () => {
 
     vi.unstubAllGlobals();
   });
+
+  it('updates persistent cache stats for new markets', async () => {
+    const markets = gammaMarkets(2);
+    const trades0 = clobTrades('0xcond_market_0', 1, 2);
+    const trades1 = clobTrades('0xcond_market_1', 1, 2);
+
+    vi.stubGlobal('fetch', vi.fn().mockImplementation(async (url: string) => {
+      if (url.includes('/markets')) {
+        return { ok: true, json: () => Promise.resolve(markets) };
+      }
+      if (url.includes('market=0xcond_market_0')) {
+        return { ok: true, json: () => Promise.resolve(trades0) };
+      }
+      if (url.includes('market=0xcond_market_1')) {
+        return { ok: true, json: () => Promise.resolve(trades1) };
+      }
+      return { ok: true, json: () => Promise.resolve([]) };
+    }));
+
+    const config = makeConfig({
+      minAddressVolumeUsd: 0,
+      minAddressTrades: 1,
+    });
+    const scanner = new WhaleScanner(db, config, 'https://gamma.test', 'https://clob.test');
+
+    await scanner.triggerScan();
+    const state1 = scanner.getState();
+    expect(state1.newMarketsLastBatch).toBe(2);
+    expect(state1.persistentMarketsCached).toBe(2);
+
+    await scanner.triggerScan();
+    const state2 = scanner.getState();
+    expect(state2.newMarketsLastBatch).toBe(0);
+    expect(state2.persistentMarketsCached).toBe(2);
+
+    vi.unstubAllGlobals();
+  });
 });
 
 /* ── Helper: build a single data-api-style trade ── */

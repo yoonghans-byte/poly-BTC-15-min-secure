@@ -109,6 +109,7 @@ const MIN_LIQUIDITY_USD = 10_000;
 const BATCH_PAUSE_MS = 500;           // ← reduced from 2 000 ms for faster cycling
 const FETCH_TIMEOUT_MS = 6_000;       // ← tighter timeout (was 10 000)
 const MARKET_CACHE_TTL_MS = 300_000;  // 5 min cache for Gamma market metadata
+const PERSISTENT_MARKET_CACHE_TTL_DAYS = 30;
 
 /* ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
    Semaphore — limits concurrent async operations to N at a time.
@@ -411,6 +412,7 @@ export class WhaleScanner {
   /* ── Cumulative address aggregation across all batches ── */
   private globalAgg = new Map<string, AddressAgg>();
   private scannedMarketIds = new Set<string>();
+  private persistentMarketSeen = new Map<string, string>();
   private seenTradeHashes = new Set<string>();
 
   /* ── Cross-referencing: addresses already deep-scanned ── */
@@ -463,6 +465,8 @@ export class WhaleScanner {
     nextScanAt: null,
     marketsScanned: 0,
     totalMarketsDiscovered: 0,
+    newMarketsLastBatch: 0,
+    persistentMarketsCached: 0,
     addressesAnalysed: 0,
     profilesFound: 0,
     qualifiedCount: 0,
@@ -504,6 +508,15 @@ export class WhaleScanner {
 
     /* Initialise concurrency semaphore: controls how many parallel fetches */
     this.semaphore = new Semaphore(this.scannerConfig.parallelFetchBatch || 8);
+
+    /* Load persistent market cache for new-market detection */
+    const cached = this.db.getScannerMarketCache();
+    for (const entry of cached) {
+      this.persistentMarketSeen.set(entry.marketId, entry.lastSeenAt);
+    }
+    if (cached.length > 0) {
+      logger.info({ cachedMarkets: cached.length }, 'WhaleScanner: loaded persistent market cache');
+    }
   }
 
   /* ━━━━━━━━━━━━━━ Lifecycle ━━━━━━━━━━━━━━ */
@@ -636,6 +649,38 @@ export class WhaleScanner {
     }
   }
 
+  private updatePersistentMarketCache(markets: GammaMarket[]): { newlyDiscovered: GammaMarket[] } {
+    if (markets.length === 0) return { newlyDiscovered: [] };
+    const now = new Date().toISOString();
+    const updates: Array<{ marketId: string; lastSeenAt: string }> = [];
+    const newlyDiscovered: GammaMarket[] = [];
+
+    for (const market of markets) {
+      if (!this.persistentMarketSeen.has(market.id)) {
+        newlyDiscovered.push(market);
+      }
+      this.persistentMarketSeen.set(market.id, now);
+      updates.push({ marketId: market.id, lastSeenAt: now });
+    }
+
+    this.db.upsertScannerMarketSeen(updates);
+    return { newlyDiscovered };
+  }
+
+  private prunePersistentMarketCache(): number {
+    const cutoff = Date.now() - PERSISTENT_MARKET_CACHE_TTL_DAYS * 24 * 60 * 60 * 1000;
+    let removed = 0;
+    for (const [marketId, lastSeenAt] of this.persistentMarketSeen) {
+      if (Date.parse(lastSeenAt) < cutoff) {
+        this.persistentMarketSeen.delete(marketId);
+        removed++;
+      }
+    }
+    const dbRemoved = this.db.pruneScannerMarkets(PERSISTENT_MARKET_CACHE_TTL_DAYS);
+    this.state.persistentMarketsCached = this.persistentMarketSeen.size;
+    return Math.max(removed, dbRemoved);
+  }
+
   /* ━━━━━━━━━━━━━━ Single Scan Batch ━━━━━━━━━━━━━━ */
 
   private async runScanBatch(): Promise<void> {
@@ -646,6 +691,7 @@ export class WhaleScanner {
     this.state.currentMarket = null;
     this.state.lastError = null;
     this.state.marketsInCurrentBatch = 0;
+    this.state.newMarketsLastBatch = 0;
     this.state.batchNumber++;
     const batchStart = Date.now();
 
@@ -657,6 +703,7 @@ export class WhaleScanner {
     /* How often to rebuild profiles so the dashboard shows live data */
     const PROFILE_REBUILD_INTERVAL = 25;
     let marketsProcessedThisBatch = 0;
+    let newlyDiscoveredThisBatch = 0;
 
     try {
       /* ── Page-by-page scan: discover a page of markets and immediately
@@ -690,6 +737,11 @@ export class WhaleScanner {
         );
         totalQualifying += qualifying.length;
         this.state.totalMarketsDiscovered = totalQualifying;
+
+  const { newlyDiscovered } = this.updatePersistentMarketCache(qualifying);
+  newlyDiscoveredThisBatch += newlyDiscovered.length;
+  this.state.newMarketsLastBatch = newlyDiscoveredThisBatch;
+  this.state.persistentMarketsCached = this.persistentMarketSeen.size;
 
         const lastLiq = Number(page[page.length - 1].liquidityNum);
         if (lastLiq < MIN_LIQUIDITY_USD || page.length < GAMMA_PAGE_SIZE) {
@@ -873,6 +925,18 @@ export class WhaleScanner {
         avgLatencyMs: this.state.perf.avgFetchLatencyMs,
         concurrency,
       }, 'Scanner batch complete');
+
+      if (newlyDiscoveredThisBatch > 0) {
+        logger.info({
+          newlyDiscovered: newlyDiscoveredThisBatch,
+          totalCachedMarkets: this.persistentMarketSeen.size,
+        }, 'Scanner: persistent market cache updated');
+      }
+
+      const pruned = this.prunePersistentMarketCache();
+      if (pruned > 0) {
+        logger.info({ pruned, remaining: this.persistentMarketSeen.size }, 'Scanner: pruned persistent market cache');
+      }
     } catch (err) {
       this.state.status = this.state.enabled ? 'scanning' : 'error';
       this.state.lastError = err instanceof Error ? err.message : String(err);

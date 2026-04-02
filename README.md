@@ -13,7 +13,9 @@
 
 **7 trading strategies · 🐋 whale tracker & copy-trade simulator · 📊 real-time dashboard · 🔒 paper trading by default**
 
-[Features](#-features) · [Quick Start](#-quick-start) · [Strategies](#-strategies) · [Whale Scanner](#-whale-tracking--scanner) · [Dashboard](#-real-time-dashboard) · [Configuration](#%EF%B8%8F-configuration) · [API Reference](#-api-endpoints) · [Custom Development](#-custom-bot-development)
+> **🆕 First time?** Read the **[Step-by-Step Setup Guide](SETUP_GUIDE.md)** — no coding experience needed.
+
+[Features](#-features) · [Quick Start](#-quick-start) · [.env Setup](#-env-file-setup) · [Paper vs Live Trading](#-paper-vs-live-trading) · [Strategies](#-strategies) · [Whale Scanner](#-whale-tracking--scanner) · [Dashboard](#-real-time-dashboard) · [Configuration](#%EF%B8%8F-configuration) · [API Reference](#-api-endpoints) · [Custom Development](#-custom-bot-development)
 
 <br/>
 
@@ -126,6 +128,8 @@ The platform includes an enterprise-level **whale tracking engine** that auto-di
 - **npm** (comes with Node.js)
 - **Git** ([download](https://git-scm.com/))
 
+> **Need more help installing these?** See the [Setup Guide](SETUP_GUIDE.md#step-1-install-the-prerequisites) for detailed OS-specific instructions.
+
 ### Installation
 
 ```bash
@@ -138,17 +142,21 @@ npm install
 
 # Build the project
 npm run build
+
+# Set up your environment file
+cp .env.example .env
 ```
+
+> **Windows users:** Use `copy .env.example .env` instead of `cp`.
 
 ### Launch (Paper Trading — Safe by Default)
 
 ```bash
 # Start the bot with default config (all wallets in PAPER mode)
 npm start
-
-# Or use the CLI directly
-node dist/cli.js start --config config.yaml
 ```
+
+No `.env` changes needed for paper trading — it works out of the box with fake money.
 
 The bot will start all 10 wallets (8 strategies), launch the whale scanner, and serve the dashboard at:
 
@@ -478,11 +486,132 @@ wallets:
       max_drawdown: 0.10         # 10% max drawdown
 ```
 
-### Enabling LIVE Trading
+---
+
+## 📁 .env File Setup
+
+The `.env` file stores your private settings (API keys, trading mode). It is **never uploaded to GitHub** — it's in `.gitignore`.
+
+### Create your .env file
 
 ```bash
-# LIVE trading requires explicit opt-in via environment variable
-ENABLE_LIVE_TRADING=true npm start
+cp .env.example .env       # Mac/Linux
+copy .env.example .env     # Windows
+```
+
+### What's inside
+
+| Variable | Required? | Default | Description |
+|----------|-----------|---------|-------------|
+| `ENABLE_LIVE_TRADING` | For live trading | `false` | Set to `true` to allow real trades |
+| `POLYMARKET_API_KEY` | For live trading | *(empty)* | Your Polymarket API key |
+| `DASHBOARD_PORT` | No | `3000` | Which port the dashboard runs on |
+| `LOG_LEVEL` | No | `info` | Logging detail: `debug`, `info`, `warn`, `error` |
+
+### Example .env for paper trading (no changes needed):
+
+```env
+ENABLE_LIVE_TRADING=false
+POLYMARKET_API_KEY=
+DASHBOARD_PORT=3000
+LOG_LEVEL=info
+```
+
+### Example .env for live trading:
+
+```env
+ENABLE_LIVE_TRADING=true
+POLYMARKET_API_KEY=your_api_key_from_polymarket
+DASHBOARD_PORT=3000
+LOG_LEVEL=info
+```
+
+> The `.env.example` file is included in the repo as a template. Copy it to `.env` and fill in your values.
+
+---
+
+## 📊 Paper vs Live Trading
+
+### Paper Trading (Default — No Real Money)
+
+Paper trading simulates trades with fake money. **This is the default.** Just run:
+
+```bash
+npm start
+```
+
+All wallets start in PAPER mode. You can test every strategy safely.
+
+### Live Trading (Real Money)
+
+Live trading requires **two safety switches** to both be enabled — this prevents accidentally trading with real money:
+
+| Switch | Where | What to set |
+|--------|-------|-------------|
+| **Switch 1** | `.env` file | `ENABLE_LIVE_TRADING=true` |
+| **Switch 2** | `config.yaml` | `enable_live_trading: true` |
+
+**Both must be `true`** for live trading to work. If either is `false`, all wallets run in paper mode.
+
+### Step-by-step to go live:
+
+**1. Get your Polymarket API key:**
+- Log in to [polymarket.com](https://polymarket.com)
+- Go to Settings → API Keys
+- Create and copy your key
+
+**2. Edit your `.env` file:**
+```env
+ENABLE_LIVE_TRADING=true
+POLYMARKET_API_KEY=paste_your_key_here
+```
+
+**3. Edit `config.yaml`:**
+```yaml
+environment:
+  enable_live_trading: true
+
+wallets:
+  - id: my_live_wallet
+    mode: LIVE                    # ← Must be LIVE, not PAPER
+    strategy: filtered_high_prob_convergence
+    capital: 100                  # Start small!
+    risk_limits:
+      max_position_size: 20
+      max_exposure_per_market: 50
+      max_daily_loss: 25
+      max_open_trades: 5
+      max_drawdown: 0.15
+```
+
+**4. Start the bot:**
+```bash
+npm start
+```
+
+### Safety Features (Always Active)
+
+| Protection | Description |
+|-----------|-------------|
+| Two-factor enable | Both `.env` AND `config.yaml` must enable live trading |
+| API key check | LIVE orders are refused if `POLYMARKET_API_KEY` is missing |
+| Daily loss limit | Trading pauses when daily losses hit your `max_daily_loss` |
+| Max drawdown | Trading stops if total loss exceeds your `max_drawdown` |
+| Per-trade cap | No trade exceeds `max_position_size` |
+| Rate limiting | LIVE mode: 20 orders/min (Paper: 120/min) |
+| Kill switch | Emergency stop via dashboard |
+
+> ⚠️ **Start with paper trading for at least a few days** before going live. Start with small amounts ($50–$100) when you switch to live.
+
+---
+
+### Enabling LIVE Trading
+
+See the [Paper vs Live Trading](#-paper-vs-live-trading) section above for full instructions.
+
+```bash
+# Quick version: set both .env and config.yaml, then run
+npm start
 ```
 
 > ⚠️ **Warning:** LIVE mode executes real trades with real funds. Start with PAPER mode to validate your strategy first.
@@ -562,9 +691,25 @@ docker build -t polymarket-bot .
 # Run in paper trading mode
 docker run -p 3000:3000 polymarket-bot
 
-# Run with live trading enabled
-docker run -p 3000:3000 -e ENABLE_LIVE_TRADING=true polymarket-bot
+# Run with your .env file (recommended)
+docker run -p 3000:3000 --env-file .env polymarket-bot
+
+# Run with live trading enabled (inline env vars)
+docker run -p 3000:3000 \
+  -e ENABLE_LIVE_TRADING=true \
+  -e POLYMARKET_API_KEY=your_key_here \
+  polymarket-bot
+
+# Use a custom config file
+docker run -p 3000:3000 --env-file .env \
+  -v $(pwd)/config.yaml:/app/config.yaml \
+  polymarket-bot
+
+# Run in background (24/7)
+docker run -d -p 3000:3000 --name polymarket-bot --env-file .env polymarket-bot
 ```
+
+> See the [Setup Guide](SETUP_GUIDE.md#step-9-deploy-with-docker-optional) for more Docker details.
 
 ---
 

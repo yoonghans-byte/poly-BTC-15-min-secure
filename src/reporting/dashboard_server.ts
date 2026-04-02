@@ -3272,7 +3272,7 @@ function renderWhaleList(data){
         '<span class="whale-stat '+pnlCls+'"><span class="ws-val">'+(w.totalPnlBps>0?'+':'')+w.totalPnlBps+'</span> bps</span>'+
         '<span class="whale-stat"><span class="ws-val">'+w.consecutiveLosses+'</span> streak</span>'+
       '</div>'+
-      '<button class="whale-remove-btn" onclick="removeWhale(\\''+w.address+'\\')">\u2716 Remove</button>'+
+      '<button class="whale-remove-btn" onclick="removeWhale(\\\''+w.address+'\\\')">\u2716 Remove</button>'+
     '</div>';
   }).join('');
 }

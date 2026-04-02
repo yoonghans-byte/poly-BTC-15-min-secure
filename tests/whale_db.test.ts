@@ -605,6 +605,71 @@ describe('WhaleDB — Daily Metrics', () => {
 });
 
 /* ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+   SCANNER MARKET CACHE (persistent market ID + last-seen)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */
+
+describe('WhaleDB — Scanner Market Cache', () => {
+  it('upserts and retrieves scanner market entries', () => {
+    const now = new Date().toISOString();
+    db.upsertScannerMarketSeen([
+      { marketId: 'mkt_1', lastSeenAt: now },
+      { marketId: 'mkt_2', lastSeenAt: now },
+    ]);
+
+    const cache = db.getScannerMarketCache();
+    expect(cache).toHaveLength(2);
+    expect(cache.map((c) => c.marketId).sort()).toEqual(['mkt_1', 'mkt_2']);
+    expect(cache[0].lastSeenAt).toBe(now);
+  });
+
+  it('upsert updates lastSeenAt on conflict', () => {
+    const t1 = '2025-01-01T00:00:00.000Z';
+    const t2 = '2025-06-15T12:00:00.000Z';
+
+    db.upsertScannerMarketSeen([{ marketId: 'mkt_x', lastSeenAt: t1 }]);
+    db.upsertScannerMarketSeen([{ marketId: 'mkt_x', lastSeenAt: t2 }]);
+
+    const cache = db.getScannerMarketCache();
+    expect(cache).toHaveLength(1);
+    expect(cache[0].lastSeenAt).toBe(t2);
+  });
+
+  it('handles empty upsert gracefully', () => {
+    db.upsertScannerMarketSeen([]);
+    const cache = db.getScannerMarketCache();
+    expect(cache).toHaveLength(0);
+  });
+
+  it('prunes entries older than N days', () => {
+    // Insert one old entry and one recent entry
+    const old = '2024-01-01T00:00:00.000Z';
+    const recent = new Date().toISOString();
+
+    db.upsertScannerMarketSeen([
+      { marketId: 'old_market', lastSeenAt: old },
+      { marketId: 'new_market', lastSeenAt: recent },
+    ]);
+
+    const pruned = db.pruneScannerMarkets(30);
+    expect(pruned).toBe(1);
+
+    const remaining = db.getScannerMarketCache();
+    expect(remaining).toHaveLength(1);
+    expect(remaining[0].marketId).toBe('new_market');
+  });
+
+  it('prune returns 0 when nothing to prune', () => {
+    const now = new Date().toISOString();
+    db.upsertScannerMarketSeen([{ marketId: 'fresh', lastSeenAt: now }]);
+    const pruned = db.pruneScannerMarkets(30);
+    expect(pruned).toBe(0);
+
+    const cache = db.getScannerMarketCache();
+    expect(cache).toHaveLength(1);
+  });
+});
+
+/* ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
    HELPERS
    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */
 

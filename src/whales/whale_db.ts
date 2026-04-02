@@ -180,6 +180,12 @@ export class WhaleDB {
         UNIQUE(whale_id)
       );
 
+      CREATE TABLE IF NOT EXISTS scanner_markets (
+        market_id     TEXT PRIMARY KEY,
+        first_seen_at TEXT NOT NULL DEFAULT (datetime('now')),
+        last_seen_at  TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+
       /* ── Indexes ── */
       CREATE INDEX IF NOT EXISTS idx_whale_trades_whale_ts     ON whale_trades(whale_id, ts);
       CREATE INDEX IF NOT EXISTS idx_whale_trades_market_ts    ON whale_trades(market_id, ts);
@@ -188,6 +194,7 @@ export class WhaleDB {
       CREATE INDEX IF NOT EXISTS idx_signals_created           ON signals(created_at);
       CREATE INDEX IF NOT EXISTS idx_whale_candidates_rank     ON whale_candidates(rank_score DESC);
       CREATE INDEX IF NOT EXISTS idx_whale_trades_trade_id     ON whale_trades(trade_id);
+      CREATE INDEX IF NOT EXISTS idx_scanner_markets_last_seen ON scanner_markets(last_seen_at);
     `);
   }
 
@@ -701,6 +708,40 @@ export class WhaleDB {
       drawdown: row.drawdown as number,
       lastUpdated: row.last_updated as string,
     };
+  }
+
+  /* ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+     SCANNER MARKET CACHE
+     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */
+
+  getScannerMarketCache(): { marketId: string; lastSeenAt: string }[] {
+    const rows = this.db.prepare('SELECT market_id, last_seen_at FROM scanner_markets').all() as Array<{ market_id: string; last_seen_at: string }>;
+    return rows.map((r) => ({ marketId: r.market_id, lastSeenAt: r.last_seen_at }));
+  }
+
+  upsertScannerMarketSeen(entries: Array<{ marketId: string; lastSeenAt: string }>): void {
+    if (entries.length === 0) return;
+    const stmt = this.db.prepare(`
+      INSERT INTO scanner_markets (market_id, last_seen_at)
+      VALUES (?, ?)
+      ON CONFLICT(market_id) DO UPDATE SET
+        last_seen_at = excluded.last_seen_at
+    `);
+    const trx = this.db.transaction((rows: Array<{ marketId: string; lastSeenAt: string }>) => {
+      for (const row of rows) {
+        stmt.run(row.marketId, row.lastSeenAt);
+      }
+    });
+    trx(entries);
+  }
+
+  pruneScannerMarkets(olderThanDays = 30): number {
+    const stmt = this.db.prepare(`
+      DELETE FROM scanner_markets
+      WHERE last_seen_at < datetime('now', ?)
+    `);
+    const result = stmt.run(`-${olderThanDays} days`);
+    return result.changes;
   }
 
   /* ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

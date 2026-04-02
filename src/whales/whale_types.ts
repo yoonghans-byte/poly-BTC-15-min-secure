@@ -288,6 +288,10 @@ export interface ScannerState {
   marketsScanned: number;
   /** Total unique markets discovered across all batches */
   totalMarketsDiscovered: number;
+  /** Newly discovered markets in the most recent batch */
+  newMarketsLastBatch?: number;
+  /** Total markets cached in persistent store */
+  persistentMarketsCached?: number;
   addressesAnalysed: number;
   /** Alias used by dashboard — same as addressesAnalysed */
   profilesFound: number;
