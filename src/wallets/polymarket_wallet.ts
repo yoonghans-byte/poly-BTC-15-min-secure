@@ -1,6 +1,93 @@
 import { WalletConfig, WalletState, Position, TradeRecord, RiskLimits } from '../types';
 import { logger } from '../reporting/logs';
 import { consoleLog } from '../reporting/console_log';
+import { ClobClient, Chain, OrderType, SignatureType } from '@polymarket/clob-client';
+import type { ApiKeyCreds } from '@polymarket/clob-client';
+import { Wallet } from '@ethersproject/wallet';
+
+/** Cached CLOB client instance (initialised once per process) */
+let _clobClient: ClobClient | null = null;
+/** Cached tokenId lookups: conditionId → [yesTokenId, noTokenId] */
+const _tokenIdCache = new Map<string, [string, string]>();
+
+/**
+ * Build (or return cached) a fully-authenticated ClobClient.
+ * Level-1 auth is used to derive API credentials; Level-2 auth
+ * (signer + creds) is required to sign and post orders.
+ */
+async function getClobClient(clobApi: string): Promise<ClobClient> {
+  if (_clobClient) return _clobClient;
+
+  const privateKey = process.env.POLYMARKET_PRIVATE_KEY;
+  if (!privateKey) {
+    throw new Error(
+      'POLYMARKET_PRIVATE_KEY not set — required for live order signing. Add it to your .env file.',
+    );
+  }
+
+  // Normalise: accept with or without 0x prefix
+  const normalised = privateKey.startsWith('0x') ? privateKey : `0x${privateKey}`;
+
+  // Use @ethersproject/wallet — its _signTypedData satisfies ClobSigner
+  const wallet = new Wallet(normalised);
+
+  // Determine signature type: POLY_PROXY for Polymarket.com accounts
+  // (Google / Magic Link), EOA for direct-key wallets.
+  const sigTypeEnv = (process.env.POLYMARKET_SIG_TYPE ?? 'POLY_PROXY').toUpperCase();
+  const sigType =
+    sigTypeEnv === 'EOA'
+      ? SignatureType.EOA
+      : sigTypeEnv === 'POLY_GNOSIS_SAFE'
+        ? SignatureType.POLY_GNOSIS_SAFE
+        : SignatureType.POLY_PROXY;
+
+  logger.info({ address: wallet.address, sigType: sigTypeEnv }, 'Initialising CLOB client (Level-1)');
+
+  // Level-1 client: signer only, no creds — used to derive/create API key
+  const l1Client = new ClobClient(clobApi, Chain.POLYGON, wallet, undefined, sigType);
+  const creds: ApiKeyCreds = await l1Client.createOrDeriveApiKey();
+
+  logger.info({ keyPrefix: creds.key.slice(0, 8) + '…' }, 'CLOB API key derived successfully');
+
+  // Level-2 client: signer + creds — used for authenticated order placement
+  _clobClient = new ClobClient(clobApi, Chain.POLYGON, wallet, creds, sigType);
+  return _clobClient;
+}
+
+/**
+ * Resolve outcome ('YES'|'NO') to the corresponding CLOB token ID for
+ * the given condition ID. Results are cached to avoid redundant API calls.
+ */
+async function resolveTokenId(
+  client: ClobClient,
+  conditionId: string,
+  outcome: 'YES' | 'NO',
+): Promise<string> {
+  let cached = _tokenIdCache.get(conditionId);
+  if (!cached) {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const market = await client.getMarket(conditionId) as any;
+    const tokens: Array<{ token_id: string; outcome: string }> = market?.tokens ?? [];
+    if (tokens.length < 2) {
+      throw new Error(
+        `CLOB market ${conditionId} returned fewer than 2 tokens (got ${tokens.length})`,
+      );
+    }
+    // Polymarket API returns tokens with outcome 'Yes'/'No'
+    const yesToken = tokens.find((t) => t.outcome.toLowerCase() === 'yes');
+    const noToken = tokens.find((t) => t.outcome.toLowerCase() === 'no');
+    if (!yesToken || !noToken) {
+      throw new Error(
+        `Could not identify YES/NO tokens for market ${conditionId}. ` +
+        `Got outcomes: ${tokens.map((t) => t.outcome).join(', ')}`,
+      );
+    }
+    cached = [yesToken.token_id, noToken.token_id];
+    _tokenIdCache.set(conditionId, cached);
+    logger.debug({ conditionId, yesToken: cached[0].slice(0, 12) + '…', noToken: cached[1].slice(0, 12) + '…' }, 'Token IDs cached for market');
+  }
+  return outcome === 'YES' ? cached[0] : cached[1];
+}
 
 export class PolymarketWallet {
   private static readonly MAX_TRADE_HISTORY = 10_000;
@@ -66,20 +153,6 @@ export class PolymarketWallet {
     price: number;
     size: number;
   }): Promise<void> {
-    const apiKey = process.env.POLYMARKET_API_KEY;
-    if (!apiKey) {
-      const msg = 'POLYMARKET_API_KEY not set — cannot place LIVE order. Set it in your .env file.';
-      logger.error({ walletId: this.state.walletId }, msg);
-      consoleLog.error('ORDER', `[${this.state.walletId}] ${msg}`);
-      throw new Error(msg);
-    }
-    // Basic format validation — Polymarket API keys are UUIDs (M-7)
-    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(apiKey)) {
-      const msg = 'POLYMARKET_API_KEY has invalid format — expected a UUID (xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx)';
-      logger.error({ walletId: this.state.walletId }, msg);
-      throw new Error(msg);
-    }
-
     const orderId = `live-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     const cost = request.price * request.size;
 
@@ -97,38 +170,62 @@ export class PolymarketWallet {
       `LIVE order submitting ${request.side} ${request.outcome} market=${request.marketId} price=${request.price} size=${request.size}`,
     );
 
-    /* ── Submit order to Polymarket CLOB API ── */
-    const orderPayload = {
-      market: request.marketId,
-      side: request.side,
-      outcome: request.outcome,
-      price: request.price,
-      size: request.size,
-      type: 'limit',
-    };
-
-    let apiResponse: Response;
+    /* ── Build and post a properly EIP-712 signed order ── */
+    let client: ClobClient;
     try {
-      apiResponse = await fetch(`${this.clobApi}/order`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${apiKey}`,
-        },
-        body: JSON.stringify(orderPayload),
+      client = await getClobClient(this.clobApi);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      logger.error({ walletId: this.state.walletId, orderId, error: msg }, 'CLOB client initialisation failed');
+      consoleLog.error('ORDER', `[${this.state.walletId}] CLOB init failed: ${msg}`);
+      throw new Error(`CLOB client init error: ${msg}`);
+    }
+
+    let tokenId: string;
+    try {
+      tokenId = await resolveTokenId(client, request.marketId, request.outcome);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      logger.error({ walletId: this.state.walletId, orderId, marketId: request.marketId, error: msg }, 'Token ID resolution failed');
+      consoleLog.error('ORDER', `[${this.state.walletId}] Token lookup failed: ${msg}`);
+      throw new Error(`Token ID lookup error: ${msg}`);
+    }
+
+    // Map our internal side string to the ClobClient Side enum value
+    // Both happen to be 'BUY'/'SELL' strings, but we cast for type safety
+    const clobSide = request.side as 'BUY' | 'SELL';
+
+    let signedOrder;
+    try {
+      signedOrder = await client.createOrder({
+        tokenID: tokenId,
+        price: request.price,
+        size: request.size,
+        side: clobSide as Parameters<ClobClient['createOrder']>[0]['side'],
       });
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      logger.error({ walletId: this.state.walletId, orderId, error: msg }, 'LIVE order network error');
-      consoleLog.error('ORDER', `[${this.state.walletId}] Order failed (network): ${msg}`);
-      throw new Error(`LIVE order network error: ${msg}`);
+      logger.error({ walletId: this.state.walletId, orderId, error: msg }, 'Order signing failed');
+      consoleLog.error('ORDER', `[${this.state.walletId}] Order sign failed: ${msg}`);
+      // Invalidate cached client so the next attempt re-derives credentials
+      _clobClient = null;
+      throw new Error(`Order signing error: ${msg}`);
     }
 
-    if (!apiResponse.ok) {
-      let errorBody = '';
-      try { errorBody = await apiResponse.text(); } catch { /* ignore */ }
-      const msg = `LIVE order rejected by Polymarket (HTTP ${apiResponse.status}): ${errorBody}`;
-      logger.error({ walletId: this.state.walletId, orderId, status: apiResponse.status, body: errorBody }, msg);
+    let orderResponse;
+    try {
+      orderResponse = await client.postOrder(signedOrder, OrderType.GTC);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      logger.error({ walletId: this.state.walletId, orderId, error: msg }, 'LIVE order post failed');
+      consoleLog.error('ORDER', `[${this.state.walletId}] Order post failed (network): ${msg}`);
+      throw new Error(`LIVE order post error: ${msg}`);
+    }
+
+    // The CLOB API returns { success: false, errorMsg: '...' } on rejection
+    if (orderResponse?.success === false) {
+      const msg = `LIVE order rejected by Polymarket: ${orderResponse.errorMsg ?? 'unknown error'}`;
+      logger.error({ walletId: this.state.walletId, orderId, response: orderResponse }, msg);
       consoleLog.error('ORDER', `[${this.state.walletId}] ${msg}`);
       throw new Error(msg);
     }
@@ -174,6 +271,7 @@ export class PolymarketWallet {
       {
         walletId: this.state.walletId,
         orderId,
+        clobOrderId: orderResponse?.orderID,
         marketId: request.marketId,
         side: request.side,
         outcome: request.outcome,
@@ -189,6 +287,7 @@ export class PolymarketWallet {
       walletId: this.state.walletId,
       strategy: this.state.assignedStrategy,
       orderId,
+      clobOrderId: orderResponse?.orderID,
       marketId: request.marketId,
       outcome: request.outcome,
       side: request.side,
