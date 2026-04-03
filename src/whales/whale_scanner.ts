@@ -2480,6 +2480,11 @@ export class WhaleScanner {
       if (!this.state.enabled) break;
 
       try {
+        // Validate address format before building ABI calldata (M-4)
+        if (!/^0x[0-9a-fA-F]{40}$/.test(whale.address)) {
+          logger.warn({ address: whale.address }, 'Skipping balance lookup — invalid address format');
+          continue;
+        }
         /* ERC-20 balanceOf(address) selector = 0x70a08231 */
         const paddedAddr = whale.address.replace('0x', '').padStart(64, '0');
         const data = `0x70a08231${paddedAddr}`;

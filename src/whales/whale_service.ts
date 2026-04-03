@@ -98,8 +98,13 @@ export class WhaleService {
 
   addWhale(address: string, opts?: { displayName?: string; tags?: string[]; notes?: string }): Whale {
     const whale = this.db.addWhale(address, opts);
-    // Trigger backfill
-    void this.ingestion.backfillWhale(whale.id, whale.address);
+    // Trigger backfill — attach .catch() so errors are logged, not silently swallowed (H-2)
+    this.ingestion.backfillWhale(whale.id, whale.address).catch((err: unknown) => {
+      logger.error(
+        { whaleId: whale.id, address: whale.address.slice(0, 10) + '...', err },
+        'Backfill failed for newly added whale',
+      );
+    });
     return whale;
   }
 

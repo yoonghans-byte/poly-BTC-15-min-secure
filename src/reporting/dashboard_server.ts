@@ -658,10 +658,18 @@ function getStrategyCatalog(): StrategyCatalogEntry[] {
 /* ──────────────────────────────────────────────────────────────
    Helpers
    ────────────────────────────────────────────────────────────── */
+const MAX_BODY_BYTES = 1_048_576; // 1 MB — prevents memory exhaustion (C-3)
+
 function readBody(req: http.IncomingMessage): Promise<Record<string, unknown>> {
   return new Promise((resolve, reject) => {
     let data = '';
-    req.on('data', (chunk: Buffer) => (data += chunk.toString()));
+    req.on('data', (chunk: Buffer) => {
+      data += chunk.toString();
+      if (data.length > MAX_BODY_BYTES) {
+        req.destroy(new Error('Request body too large'));
+        reject(new Error('Request body too large'));
+      }
+    });
     req.on('end', () => {
       try {
         resolve(JSON.parse(data) as Record<string, unknown>);
@@ -746,10 +754,11 @@ export class DashboardServer {
       }
     });
 
-    this.server.listen(this.port, () => {
+    // Bind to 127.0.0.1 only — prevents exposure to the network (C-2)
+    this.server.listen(this.port, '127.0.0.1', () => {
       logger.info(
-        { port: this.port, url: `http://localhost:${this.port}/dashboard` },
-        'Dashboard server listening',
+        { port: this.port, url: `http://127.0.0.1:${this.port}/dashboard` },
+        'Dashboard server listening on localhost only',
       );
     });
 

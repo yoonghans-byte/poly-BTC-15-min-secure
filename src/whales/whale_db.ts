@@ -255,10 +255,26 @@ export class WhaleDB {
     if (opts?.starred !== undefined) { where += ' AND starred = ?'; params.push(opts.starred ? 1 : 0); }
     if (opts?.trackingEnabled !== undefined) { where += ' AND tracking_enabled = ?'; params.push(opts.trackingEnabled ? 1 : 0); }
     if (opts?.style) { where += ' AND style = ?'; params.push(opts.style); }
-    if (opts?.tag) { where += ' AND tags LIKE ?'; params.push(`%${opts.tag}%`); }
+    if (opts?.tag) {
+      // Escape LIKE metacharacters before wrapping in wildcards (H-5)
+      const escapedTag = opts.tag.replace(/\\/g, '\\\\').replace(/%/g, '\\%').replace(/_/g, '\\_');
+      where += " AND tags LIKE ? ESCAPE '\\'";
+      params.push(`%${escapedTag}%`);
+    }
 
     const countRow = this.db.prepare(`SELECT COUNT(*) as cnt FROM whales ${where}`).get(...params) as { cnt: number };
-    const orderBy = opts?.orderBy ?? 'last_active_at DESC NULLS LAST';
+
+    // Whitelist allowed ORDER BY columns and directions to prevent SQL injection (C-1)
+    const ALLOWED_ORDER_COLS = new Set([
+      'last_active_at', 'created_at', 'updated_at', 'last_backfill_at',
+      'address', 'display_name', 'starred', 'style',
+    ]);
+    const rawOrderBy = opts?.orderBy ?? 'last_active_at DESC NULLS LAST';
+    const [rawCol, rawDir] = rawOrderBy.split(/\s+/);
+    const col = ALLOWED_ORDER_COLS.has(rawCol ?? '') ? rawCol : 'last_active_at';
+    const dir = rawDir?.toUpperCase() === 'ASC' ? 'ASC' : 'DESC';
+    const orderBy = `${col} ${dir} NULLS LAST`;
+
     const limit = opts?.limit ?? 50;
     const offset = opts?.offset ?? 0;
 

@@ -15,11 +15,20 @@ function json(res: ServerResponse, data: unknown, status = 200): void {
   res.end(JSON.stringify(data));
 }
 
+const MAX_BODY_BYTES = 1_048_576; // 1 MB — prevents memory exhaustion (C-3)
+
 function readBody(req: IncomingMessage): Promise<string> {
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
     let body = '';
-    req.on('data', (chunk: Buffer) => { body += chunk.toString(); });
+    req.on('data', (chunk: Buffer) => {
+      body += chunk.toString();
+      if (body.length > MAX_BODY_BYTES) {
+        req.destroy(new Error('Request body too large'));
+        reject(new Error('Request body too large'));
+      }
+    });
     req.on('end', () => resolve(body));
+    req.on('error', reject);
   });
 }
 
@@ -189,6 +198,11 @@ export class WhaleAPI {
     const body = JSON.parse(await readBody(req)) as { address: string; displayName?: string; tags?: string[]; notes?: string };
     if (!body.address) {
       json(res, { error: 'address is required' }, 400);
+      return;
+    }
+    // Validate Ethereum address format before accepting (H-1)
+    if (!/^0x[0-9a-fA-F]{40}$/.test(body.address)) {
+      json(res, { error: 'Invalid Ethereum address format' }, 400);
       return;
     }
     const whale = this.service.addWhale(body.address, {

@@ -287,8 +287,13 @@ program
       capital: string;
       config: string;
     }) => {
+    // Validate wallet ID to prevent YAML injection via control characters (M-1)
+    if (!/^[a-zA-Z0-9_-]{1,64}$/.test(options.id)) {
+      logger.error({ walletId: options.id }, 'Invalid wallet ID — only alphanumeric, hyphens, and underscores allowed (max 64 chars)');
+      process.exit(1);
+    }
     const raw = fs.readFileSync(options.config, 'utf8');
-  const parsed = YAML.parse(raw) as ConfigDocument;
+    const parsed = YAML.parse(raw) as ConfigDocument;
     parsed.wallets = parsed.wallets ?? [];
     parsed.wallets.push({
       id: options.id,

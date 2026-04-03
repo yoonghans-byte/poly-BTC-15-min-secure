@@ -215,8 +215,18 @@ export class Engine {
 
     for (const runner of this.runners) {
       if (this.pausedWallets.has(runner.walletId)) continue;  // skip paused
-      runner.strategy.onTimer();
-      await this.processSignals(runner);
+      try {
+        runner.strategy.onTimer();
+        await this.processSignals(runner);
+      } catch (err) {
+        // Isolate per-runner errors so one bad strategy cannot halt all runners (H-3)
+        const msg = err instanceof Error ? err.message : String(err);
+        logger.error({ walletId: runner.walletId, strategy: runner.strategy.name, err: msg }, 'Strategy tick error — runner isolated');
+        consoleLog.error('ENGINE', `Strategy tick error for wallet ${runner.walletId}: ${msg}`, {
+          walletId: runner.walletId,
+          strategy: runner.strategy.name,
+        });
+      }
     }
   }
 

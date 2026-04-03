@@ -273,7 +273,8 @@ export class WhaleIngestion {
     after?: string,
     limit = 100,
   ): Promise<ClobTrade[]> {
-    let url = `${this.clobApi}/trades?maker_address=${address}&limit=${limit}`;
+    // Always URL-encode dynamic parameters to prevent injection (H-1, M-3)
+    let url = `${this.clobApi}/trades?maker_address=${encodeURIComponent(address)}&limit=${encodeURIComponent(String(limit))}`;
     if (after) url += `&after=${encodeURIComponent(after)}`;
 
     this.recordRequest();
@@ -284,7 +285,7 @@ export class WhaleIngestion {
   }
 
   private async fetchOrderbook(tokenId: string): Promise<OrderbookSnapshot | null> {
-    const url = `${this.clobApi}/book?token_id=${tokenId}`;
+    const url = `${this.clobApi}/book?token_id=${encodeURIComponent(tokenId)}`;
     this.recordRequest();
     const res = await this.fetchWithRetry(url);
     if (!res) return null;

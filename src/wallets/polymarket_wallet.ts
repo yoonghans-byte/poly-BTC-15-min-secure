@@ -73,6 +73,12 @@ export class PolymarketWallet {
       consoleLog.error('ORDER', `[${this.state.walletId}] ${msg}`);
       throw new Error(msg);
     }
+    // Basic format validation — Polymarket API keys are UUIDs (M-7)
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(apiKey)) {
+      const msg = 'POLYMARKET_API_KEY has invalid format — expected a UUID (xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx)';
+      logger.error({ walletId: this.state.walletId }, msg);
+      throw new Error(msg);
+    }
 
     const orderId = `live-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     const cost = request.price * request.size;
