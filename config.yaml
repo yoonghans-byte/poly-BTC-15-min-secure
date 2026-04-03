@@ -1,5 +1,5 @@
 environment:
-  enable_live_trading: false
+  enable_live_trading: true
 
 wallets:
   - id: wallet_1

@@ -7,8 +7,10 @@ import { Wallet } from '@ethersproject/wallet';
 
 /** Cached CLOB client instance (initialised once per process) */
 let _clobClient: ClobClient | null = null;
-/** Cached tokenId lookups: conditionId → [yesTokenId, noTokenId] */
+/** Cached tokenId lookups: Gamma marketId → [yesTokenId, noTokenId] */
 const _tokenIdCache = new Map<string, [string, string]>();
+/** Gamma API base URL (used for token ID resolution) */
+const _gammaApi = process.env.POLYMARKET_GAMMA_API ?? 'https://gamma-api.polymarket.com';
 
 /**
  * Build (or return cached) a fully-authenticated ClobClient.
@@ -55,36 +57,41 @@ async function getClobClient(clobApi: string): Promise<ClobClient> {
 }
 
 /**
- * Resolve outcome ('YES'|'NO') to the corresponding CLOB token ID for
- * the given condition ID. Results are cached to avoid redundant API calls.
+ * Resolve outcome ('YES'|'NO') to the corresponding CLOB token ID for a
+ * given Gamma market ID. Uses the Gamma API (which accepts integer IDs)
+ * and caches results to avoid redundant calls.
  */
 async function resolveTokenId(
-  client: ClobClient,
-  conditionId: string,
+  marketId: string,
   outcome: 'YES' | 'NO',
 ): Promise<string> {
-  let cached = _tokenIdCache.get(conditionId);
+  let cached = _tokenIdCache.get(marketId);
   if (!cached) {
+    const res = await fetch(`${_gammaApi}/markets/${marketId}`);
+    if (!res.ok) {
+      throw new Error(`Gamma API returned HTTP ${res.status} for market ${marketId}`);
+    }
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const market = await client.getMarket(conditionId) as any;
-    const tokens: Array<{ token_id: string; outcome: string }> = market?.tokens ?? [];
-    if (tokens.length < 2) {
+    const market = await res.json() as any;
+    // Gamma returns clobTokenIds as a JSON-encoded array string
+    let tokenIds: string[] = [];
+    if (typeof market.clobTokenIds === 'string') {
+      tokenIds = JSON.parse(market.clobTokenIds) as string[];
+    } else if (Array.isArray(market.clobTokenIds)) {
+      tokenIds = market.clobTokenIds as string[];
+    }
+    if (tokenIds.length < 2) {
       throw new Error(
-        `CLOB market ${conditionId} returned fewer than 2 tokens (got ${tokens.length})`,
+        `Gamma market ${marketId} returned fewer than 2 clobTokenIds (got ${tokenIds.length})`,
       );
     }
-    // Polymarket API returns tokens with outcome 'Yes'/'No'
-    const yesToken = tokens.find((t) => t.outcome.toLowerCase() === 'yes');
-    const noToken = tokens.find((t) => t.outcome.toLowerCase() === 'no');
-    if (!yesToken || !noToken) {
-      throw new Error(
-        `Could not identify YES/NO tokens for market ${conditionId}. ` +
-        `Got outcomes: ${tokens.map((t) => t.outcome).join(', ')}`,
-      );
-    }
-    cached = [yesToken.token_id, noToken.token_id];
-    _tokenIdCache.set(conditionId, cached);
-    logger.debug({ conditionId, yesToken: cached[0].slice(0, 12) + '…', noToken: cached[1].slice(0, 12) + '…' }, 'Token IDs cached for market');
+    // Gamma convention: index 0 = YES, index 1 = NO
+    cached = [tokenIds[0], tokenIds[1]];
+    _tokenIdCache.set(marketId, cached);
+    logger.debug(
+      { marketId, yesToken: cached[0].slice(0, 12) + '…', noToken: cached[1].slice(0, 12) + '…' },
+      'Token IDs cached for market',
+    );
   }
   return outcome === 'YES' ? cached[0] : cached[1];
 }
@@ -183,7 +190,7 @@ export class PolymarketWallet {
 
     let tokenId: string;
     try {
-      tokenId = await resolveTokenId(client, request.marketId, request.outcome);
+      tokenId = await resolveTokenId(request.marketId, request.outcome);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       logger.error({ walletId: this.state.walletId, orderId, marketId: request.marketId, error: msg }, 'Token ID resolution failed');

@@ -26,8 +26,8 @@ const statePath = path.resolve('.runtime/state.json');
 function validateEnv(): void {
   const errors: string[] = [];
   const enableLive = process.env.ENABLE_LIVE_TRADING === 'true';
-  if (enableLive && !process.env.POLYMARKET_API_KEY) {
-    errors.push('POLYMARKET_API_KEY is required when ENABLE_LIVE_TRADING=true');
+  if (enableLive && !process.env.POLYMARKET_PRIVATE_KEY) {
+    errors.push('POLYMARKET_PRIVATE_KEY is required when ENABLE_LIVE_TRADING=true');
   }
   const dashboardPort = process.env.DASHBOARD_PORT;
   if (dashboardPort !== undefined) {
