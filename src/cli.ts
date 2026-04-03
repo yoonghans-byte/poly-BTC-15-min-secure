@@ -22,6 +22,31 @@ import type { WhaleTrackingConfig, ScannerConfig } from './whales/whale_types';
 const program = new Command();
 const statePath = path.resolve('.runtime/state.json');
 
+/* ── L-3: Startup environment validation ── */
+function validateEnv(): void {
+  const errors: string[] = [];
+  const enableLive = process.env.ENABLE_LIVE_TRADING === 'true';
+  if (enableLive && !process.env.POLYMARKET_API_KEY) {
+    errors.push('POLYMARKET_API_KEY is required when ENABLE_LIVE_TRADING=true');
+  }
+  const dashboardPort = process.env.DASHBOARD_PORT;
+  if (dashboardPort !== undefined) {
+    const port = Number(dashboardPort);
+    if (!Number.isInteger(port) || port < 1 || port > 65535) {
+      errors.push(`DASHBOARD_PORT must be an integer between 1 and 65535, got: "${dashboardPort}"`);
+    }
+  }
+  const logLevel = process.env.LOG_LEVEL;
+  const validLevels = new Set(['fatal', 'error', 'warn', 'info', 'debug', 'trace']);
+  if (logLevel && !validLevels.has(logLevel)) {
+    errors.push(`LOG_LEVEL must be one of: ${[...validLevels].join(', ')}, got: "${logLevel}"`);
+  }
+  if (errors.length > 0) {
+    for (const e of errors) logger.error(e);
+    process.exit(1);
+  }
+}
+
 /* ── Config normalization helpers ── */
 
 /** Convert a snake_case string to camelCase */
@@ -161,8 +186,12 @@ type ConfigDocument = {
 };
 
 function writeState(state: Record<string, unknown>): void {
-  fs.mkdirSync(path.dirname(statePath), { recursive: true });
-  fs.writeFileSync(statePath, JSON.stringify(state, null, 2));
+  const dir = path.dirname(statePath);
+  fs.mkdirSync(dir, { recursive: true });
+  // L-4: Atomic write — write to .tmp then rename to prevent corrupt reads on crash
+  const tmpPath = `${statePath}.tmp`;
+  fs.writeFileSync(tmpPath, JSON.stringify(state, null, 2));
+  fs.renameSync(tmpPath, statePath);
 }
 
 function readState(): Record<string, unknown> {
@@ -182,6 +211,7 @@ program
   .description('Start the trading engine')
   .option('-c, --config <path>', 'Config path', 'config.yaml')
   .action(async (options: { config: string }) => {
+    validateEnv(); // L-3: Validate env vars before anything else
     const config = loadConfig(options.config);
     const walletManager = new WalletManager();
     for (const wallet of config.wallets) {

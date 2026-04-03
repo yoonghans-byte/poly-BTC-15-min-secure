@@ -18,7 +18,9 @@ jobs:
         with:
           script: |
             const commitMsg = context.payload.head_commit?.message || 'No message';
-            const firstLine = commitMsg.split('\n')[0];
+            // L-6: Escape Telegram MarkdownV2 special characters to prevent formatting injection
+            const rawFirstLine = commitMsg.split('\n')[0];
+            const firstLine = rawFirstLine.replace(/[_*[\]()~`>#+\-=|{}.!\\]/g, '\\$&');
             const repo = context.payload.repository?.full_name || 'unknown';
             const branch = (context.ref || '').replace('refs/heads/', '');
             const sha = (context.sha || '').substring(0, 7);

@@ -1290,6 +1290,16 @@ export class DashboardServer {
 
     /* ─── SSE: Real-time dashboard data stream ─── */
     if (path === '/api/stream' && method === 'GET') {
+      // M-8: Optional token auth — set DASHBOARD_TOKEN env var to enable
+      const requiredToken = process.env.DASHBOARD_TOKEN;
+      if (requiredToken) {
+        const urlObj = new URL(req.url ?? '/', `http://localhost`);
+        if (urlObj.searchParams.get('token') !== requiredToken) {
+          res.writeHead(401, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Unauthorized' }));
+          return;
+        }
+      }
       res.writeHead(200, {
         'Content-Type': 'text/event-stream',
         'Cache-Control': 'no-cache',

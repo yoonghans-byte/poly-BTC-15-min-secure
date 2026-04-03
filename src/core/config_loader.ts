@@ -36,6 +36,25 @@ export function loadConfig(path: string): AppConfig {
   const raw = fs.readFileSync(path, 'utf8');
   const parsed = YAML.parse(raw) as RawConfig;
 
+  // M-2: Runtime schema validation — reject obviously invalid values at startup
+  if (parsed.wallets) {
+    for (const w of parsed.wallets) {
+      if (typeof w.id !== 'string' || !w.id) throw new Error(`config: wallet missing id`);
+      if (typeof w.strategy !== 'string' || !w.strategy) throw new Error(`config: wallet "${w.id}" missing strategy`);
+      if (w.capital !== undefined && (typeof w.capital !== 'number' || !isFinite(w.capital) || w.capital < 0)) {
+        throw new Error(`config: wallet "${w.id}" capital must be a non-negative finite number`);
+      }
+      if (w.risk_limits) {
+        const rl = w.risk_limits;
+        for (const [key, val] of Object.entries(rl)) {
+          if (val !== undefined && (typeof val !== 'number' || !isFinite(val) || val < 0)) {
+            throw new Error(`config: wallet "${w.id}" risk_limits.${key} must be a non-negative finite number`);
+          }
+        }
+      }
+    }
+  }
+
   const wallets = (parsed.wallets ?? []).map((wallet) => ({
     id: wallet.id,
     mode: wallet.mode ?? 'PAPER',
