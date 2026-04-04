@@ -13,6 +13,17 @@ wallets:
       max_open_trades: 3
       max_drawdown: 0.3
 
+  - id: wallet_btc15m
+    mode: PAPER
+    strategy: btc15m
+    capital: 50
+    risk_limits:
+      max_position_size: 10
+      max_exposure_per_market: 15
+      max_daily_loss: 10
+      max_open_trades: 2
+      max_drawdown: 0.25
+
 
 strategy_config:
   cross_market_arbitrage:
@@ -58,6 +69,23 @@ strategy_config:
     max_total_mle_pct: 0.15
     max_orders_per_minute: 30
     max_cancel_rate: 0.5
+
+  # ── BTC 15-Minute Market Strategy ─────────────────────────────────
+  btc15m:
+    candleInterval: '1m'       # Binance kline interval
+    candleLimit: 50            # Number of candles to fetch
+    rsiPeriod: 14
+    macdFast: 12
+    macdSlow: 26
+    macdSignal: 9
+    scoreThreshold: 40         # Min |score| (0-100) to enter a trade
+    minLiquidity: 500
+    minTimeRemainingMs: 180000 # Don't enter < 3 min before market expiry
+    positionSizePct: 0.05      # 5% of available capital per position
+    takeProfitBps: 150
+    stopLossBps: 100
+    maxHoldMinutes: 12
+    candleRefreshMs: 30000     # Re-fetch Binance candles every 30 seconds
 
   # ── Copy Trading Strategy ──────────────────────────────────────────
   copy_trade:
