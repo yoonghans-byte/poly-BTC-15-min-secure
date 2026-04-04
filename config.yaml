@@ -5,129 +5,14 @@ wallets:
   - id: wallet_1
     mode: LIVE
     strategy: cross_market_arbitrage
-    capital: 1000
+    capital: 20
     risk_limits:
-      max_position_size: 200
-      max_exposure_per_market: 300
-      max_daily_loss: 150
-      max_open_trades: 10
-      max_drawdown: 0.2
+      max_position_size: 4
+      max_exposure_per_market: 8
+      max_daily_loss: 5
+      max_open_trades: 3
+      max_drawdown: 0.3
 
-  - id: wallet_2
-    mode: PAPER
-    strategy: ai_forecast
-    capital: 500
-
-  - id: wallet_3
-    mode: PAPER
-    strategy: market_making
-    capital: 300
-    risk_limits:
-      max_position_size: 60
-      max_exposure_per_market: 100
-      max_daily_loss: 50
-      max_open_trades: 20
-      max_drawdown: 0.2
-
-  - id: wallet_4
-    mode: PAPER
-    strategy: filtered_high_prob_convergence
-    capital: 2000
-    risk_limits:
-      max_position_size: 500
-      max_exposure_per_market: 400
-      max_daily_loss: 200
-      max_open_trades: 100
-      max_drawdown: 0.15
-
-  # ── Paper Trading Wallets ($10k each, generous risk limits) ──
-  - id: paper_cross_market_arb
-    mode: PAPER
-    strategy: cross_market_arbitrage
-    capital: 10000
-    risk_limits:
-      max_position_size: 500
-      max_exposure_per_market: 1000
-      max_daily_loss: 500
-      max_open_trades: 50
-      max_drawdown: 0.10
-
-  - id: paper_mispricing_arb
-    mode: PAPER
-    strategy: mispricing_arbitrage
-    capital: 10000
-    risk_limits:
-      max_position_size: 500
-      max_exposure_per_market: 1000
-      max_daily_loss: 500
-      max_open_trades: 50
-      max_drawdown: 0.10
-
-  - id: paper_ai_forecast
-    mode: PAPER
-    strategy: ai_forecast
-    capital: 10000
-    risk_limits:
-      max_position_size: 500
-      max_exposure_per_market: 1000
-      max_daily_loss: 500
-      max_open_trades: 50
-      max_drawdown: 0.10
-
-  - id: paper_market_making
-    mode: PAPER
-    strategy: market_making
-    capital: 10000
-    risk_limits:
-      max_position_size: 500
-      max_exposure_per_market: 1000
-      max_daily_loss: 500
-      max_open_trades: 50
-      max_drawdown: 0.10
-
-  - id: paper_momentum
-    mode: PAPER
-    strategy: momentum
-    capital: 10000
-    risk_limits:
-      max_position_size: 500
-      max_exposure_per_market: 1000
-      max_daily_loss: 500
-      max_open_trades: 50
-      max_drawdown: 0.10
-
-  - id: paper_user_defined
-    mode: PAPER
-    strategy: user_defined
-    capital: 10000
-    risk_limits:
-      max_position_size: 500
-      max_exposure_per_market: 1000
-      max_daily_loss: 500
-      max_open_trades: 50
-      max_drawdown: 0.10
-
-  - id: paper_convergence
-    mode: PAPER
-    strategy: filtered_high_prob_convergence
-    capital: 10000
-    risk_limits:
-      max_position_size: 500
-      max_exposure_per_market: 1000
-      max_daily_loss: 500
-      max_open_trades: 50
-      max_drawdown: 0.10
-
-  - id: paper_copy_trade
-    mode: PAPER
-    strategy: copy_trade
-    capital: 10000
-    risk_limits:
-      max_position_size: 500
-      max_exposure_per_market: 500
-      max_daily_loss: 500
-      max_open_trades: 30
-      max_drawdown: 0.15
 
 strategy_config:
   cross_market_arbitrage:
@@ -143,7 +28,7 @@ strategy_config:
   filtered_high_prob_convergence:
     enabled: true
     # ── Market selection filters ──
-    min_liquidity_usd: 10000
+    min_liquidity_usd: 1000
     min_prob: 0.65
     max_prob: 0.96
     max_spread_bps: 200
@@ -156,8 +41,8 @@ strategy_config:
     min_net_buy_flow_usd: 500
     max_correlated_exposure_pct: 0.25
     # ── Position sizing ──
-    base_risk_pct: 0.005
-    max_position_usd_per_market: 200
+    base_risk_pct: 0.15
+    max_position_usd_per_market: 3
     max_total_open_positions: 10
     # ── Entry ──
     ttl_seconds: 120
@@ -171,7 +56,7 @@ strategy_config:
     max_weekly_drawdown_pct: 0.08
     max_market_mle_pct: 0.05
     max_total_mle_pct: 0.15
-    max_orders_per_minute: 10
+    max_orders_per_minute: 30
     max_cancel_rate: 0.5
 
   # ── Copy Trading Strategy ──────────────────────────────────────────
@@ -220,7 +105,7 @@ polymarket:
 
 # ── Whale Tracking Engine ──────────────────────────────────────────────────
 whale_tracking:
-  enabled: true
+  enabled: false
   dbPath: .runtime/whales.db
 
   # Ingestion

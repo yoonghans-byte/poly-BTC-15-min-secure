@@ -43,16 +43,31 @@ async function getClobClient(clobApi: string): Promise<ClobClient> {
         ? SignatureType.POLY_GNOSIS_SAFE
         : SignatureType.POLY_PROXY;
 
-  logger.info({ address: wallet.address, sigType: sigTypeEnv }, 'Initialising CLOB client (Level-1)');
+  // For POLY_PROXY accounts (Google / Magic Link), the funderAddress is the
+  // proxy wallet shown on polymarket.com — where USDC actually lives
+  const funderAddress = process.env.POLYMARKET_PROXY_ADDRESS || undefined;
+
+  logger.info({ address: wallet.address, sigType: sigTypeEnv, funderAddress }, 'Initialising CLOB client (Level-1)');
 
   // Level-1 client: signer only, no creds — used to derive/create API key
-  const l1Client = new ClobClient(clobApi, Chain.POLYGON, wallet, undefined, sigType);
+  const l1Client = new ClobClient(clobApi, Chain.POLYGON, wallet, undefined, sigType, funderAddress);
   const creds: ApiKeyCreds = await l1Client.createOrDeriveApiKey();
 
   logger.info({ keyPrefix: creds.key.slice(0, 8) + '…' }, 'CLOB API key derived successfully');
 
   // Level-2 client: signer + creds — used for authenticated order placement
-  _clobClient = new ClobClient(clobApi, Chain.POLYGON, wallet, creds, sigType);
+  _clobClient = new ClobClient(clobApi, Chain.POLYGON, wallet, creds, sigType, funderAddress);
+
+  // Sync CLOB's view of the proxy wallet's USDC balance and allowance
+  try {
+    const { AssetType } = await import('@polymarket/clob-client');
+    await _clobClient.updateBalanceAllowance({ asset_type: AssetType.COLLATERAL });
+    const bal = await _clobClient.getBalanceAllowance({ asset_type: AssetType.COLLATERAL });
+    logger.info({ balance: bal.balance, allowance: bal.allowance }, 'CLOB balance/allowance synced');
+  } catch (e) {
+    logger.warn({ err: e instanceof Error ? e.message : String(e) }, 'Could not sync balance/allowance — orders may fail');
+  }
+
   return _clobClient;
 }
 
@@ -229,9 +244,15 @@ export class PolymarketWallet {
       throw new Error(`LIVE order post error: ${msg}`);
     }
 
-    // The CLOB API returns { success: false, errorMsg: '...' } on rejection
-    if (orderResponse?.success === false) {
-      const msg = `LIVE order rejected by Polymarket: ${orderResponse.errorMsg ?? 'unknown error'}`;
+    // Log the raw response so we can see exactly what Polymarket returned
+    logger.info({ walletId: this.state.walletId, orderId, orderResponse }, 'CLOB postOrder raw response');
+
+    // Reject if Polymarket returned an error (success:false OR error field OR HTTP 4xx status)
+    const hasError = orderResponse?.success === false
+      || typeof orderResponse?.error === 'string'
+      || (typeof orderResponse?.status === 'number' && orderResponse.status >= 400);
+    if (hasError) {
+      const msg = `LIVE order rejected by Polymarket: ${orderResponse?.error ?? orderResponse?.errorMsg ?? `HTTP ${orderResponse?.status}`}`;
       logger.error({ walletId: this.state.walletId, orderId, response: orderResponse }, msg);
       consoleLog.error('ORDER', `[${this.state.walletId}] ${msg}`);
       throw new Error(msg);
