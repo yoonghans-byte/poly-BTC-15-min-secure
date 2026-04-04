@@ -141,7 +141,7 @@ class ConsoleLogSingleton extends EventEmitter {
       'Content-Type': 'text/event-stream',
       'Cache-Control': 'no-cache',
       Connection: 'keep-alive',
-      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Origin': 'http://127.0.0.1:3000',
     });
 
     // Send recent history as a burst so the client is immediately populated

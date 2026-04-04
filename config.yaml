@@ -2,25 +2,14 @@ environment:
   enable_live_trading: true
 
 wallets:
-  - id: wallet_1
+  - id: wallet_btc15m
     mode: LIVE
-    strategy: cross_market_arbitrage
+    strategy: btc15m
     capital: 20
     risk_limits:
       max_position_size: 4
       max_exposure_per_market: 8
       max_daily_loss: 5
-      max_open_trades: 3
-      max_drawdown: 0.3
-
-  - id: wallet_btc15m
-    mode: PAPER
-    strategy: btc15m
-    capital: 50
-    risk_limits:
-      max_position_size: 10
-      max_exposure_per_market: 15
-      max_daily_loss: 10
       max_open_trades: 2
       max_drawdown: 0.25
 

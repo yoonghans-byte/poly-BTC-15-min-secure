@@ -116,8 +116,16 @@ export class Btc15mStrategy extends BaseStrategy {
         this.params.candleLimit,
       );
       this.lastCandleFetch = now;
-    } catch {
+    } catch (err) {
       // Keep using stale candles — do not crash the engine tick
+      const staleSecs = Math.round((now - this.lastCandleFetch) / 1000);
+      const msg = err instanceof Error ? err.message : String(err);
+      if (this.lastCandleFetch > 0) {
+        // Only warn if we had candles before — avoids noise on first fetch
+        import('../../reporting/logs').then(({ logger }) => {
+          logger.warn({ error: msg, staleSeconds: staleSecs }, 'BTC candle fetch failed — using stale data');
+        }).catch(() => {});
+      }
     }
   }
 
@@ -277,8 +285,10 @@ export class Btc15mStrategy extends BaseStrategy {
     const ha = this.buildHeikenAshi();
     if (ha.length < 2) return 0;
 
+    const last = ha[ha.length - 1];
+    if (!last) return 0;
     let consecutive = 0;
-    const lastColor = ha[ha.length - 1].close > ha[ha.length - 1].open ? 1 : -1;
+    const lastColor = last.close > last.open ? 1 : -1;
 
     for (let i = ha.length - 1; i >= 0; i--) {
       const color = ha[i].close > ha[i].open ? 1 : -1;

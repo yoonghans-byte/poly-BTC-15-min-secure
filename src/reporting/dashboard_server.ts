@@ -684,7 +684,7 @@ function readBody(req: http.IncomingMessage): Promise<Record<string, unknown>> {
 function json(res: http.ServerResponse, status: number, body: unknown): void {
   res.writeHead(status, {
     'Content-Type': 'application/json',
-    'Access-Control-Allow-Origin': '*',
+    'Access-Control-Allow-Origin': 'http://127.0.0.1:3000',
     'Access-Control-Allow-Methods': 'GET,POST,DELETE,OPTIONS',
     'Access-Control-Allow-Headers': 'Content-Type',
   });
@@ -847,6 +847,15 @@ export class DashboardServer {
         return;
       }
 
+      // Validate walletId — only alphanumeric, hyphens, underscores (M-1)
+      if (!/^[a-zA-Z0-9_-]{1,64}$/.test(walletId)) {
+        json(res, 400, {
+          ok: false,
+          error: 'walletId must be 1-64 characters: letters, numbers, hyphens, underscores only',
+        });
+        return;
+      }
+
       const knownStrategies = listStrategies();
       if (!knownStrategies.includes(strategy)) {
         json(res, 400, {
@@ -982,9 +991,9 @@ export class DashboardServer {
       const body = await readBody(req);
       const changes: string[] = [];
 
-      /* Display name */
+      /* Display name — strip non-printable and dangerous characters (M-display) */
       if (typeof body.displayName === 'string') {
-        const name = body.displayName.trim();
+        const name = body.displayName.trim().slice(0, 100).replace(/[<>"'&]/g, '');
         if (name) {
           this.walletDisplayNames.set(walletId, name);
           if (typeof wallet.setDisplayName === 'function') wallet.setDisplayName(name);
@@ -1304,7 +1313,7 @@ export class DashboardServer {
         'Content-Type': 'text/event-stream',
         'Cache-Control': 'no-cache',
         Connection: 'keep-alive',
-        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Origin': 'http://127.0.0.1:3000',
       });
       res.write(':\n\n');  // comment to establish connection
 
