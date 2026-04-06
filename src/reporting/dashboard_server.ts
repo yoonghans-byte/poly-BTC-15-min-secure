@@ -5206,6 +5206,9 @@ async function renderBtc15mLive(){
     const decColor=s.decision.includes('YES')?'#4caf50':s.decision.includes('NO')?'#f44336':'#f9a825';
     html+='<div style="font-size:28px;font-weight:bold;color:'+decColor+';margin:12px 0">'+s.decision+'</div>';
     html+='<div style="font-size:12px;color:#888">Threshold: \\u00b1'+s.threshold+' | Candles: '+s.candles+'</div>';
+    const regimeColor=s.regime==='TREND_UP'?'#4caf50':s.regime==='TREND_DOWN'?'#f44336':s.regime==='CHOP'?'#f9a825':'#888';
+    html+='<div style="font-size:12px;margin-top:4px">Regime: <span style="color:'+regimeColor+';font-weight:bold">'+(s.regime||'N/A')+'</span></div>';
+    if(s.scores&&s.scores.timeDecay!==undefined){html+='<div style="font-size:12px;color:#888">Time decay: '+(s.scores.timeDecay*100).toFixed(0)+'% conviction | Raw score: '+(s.scores.raw>0?'+':'')+s.scores.raw+'</div>';}
     html+='<div style="font-size:12px;color:#888">Last candle fetch: '+(s.lastCandleFetch?new Date(s.lastCandleFetch).toLocaleTimeString():'never')+'</div>';
     html+='</div></div>';
     /* Score breakdown */
@@ -5213,10 +5216,12 @@ async function renderBtc15mLive(){
     html+='<h3 style="color:#4fc3f7;margin:0 0 16px">Score Breakdown</h3>';
     if(s.scores){
       const bars=[
-        {name:'Heiken Ashi',val:s.scores.ha,max:30,desc:'Trend direction (consecutive candles)'},
-        {name:'RSI (14)',val:s.scores.rsi,max:25,desc:'Momentum / overbought / oversold'},
-        {name:'MACD (12/26/9)',val:s.scores.macd,max:25,desc:'Histogram direction & crossover'},
-        {name:'VWAP',val:s.scores.vwap,max:20,desc:'Price vs volume-weighted avg'},
+        {name:'VWAP Position',val:s.scores.vwap,max:18,desc:'Price above/below VWAP (primary signal)'},
+        {name:'VWAP Slope',val:s.scores.vwapSlope||0,max:18,desc:'VWAP trend over last 5 candles (primary signal)'},
+        {name:'MACD (12/26/9)',val:s.scores.macd,max:27,desc:'Histogram direction (\\u00b118) + line level (\\u00b19)'},
+        {name:'RSI (14)',val:s.scores.rsi,max:18,desc:'Momentum confirmation (level + slope must agree)'},
+        {name:'Heiken Ashi',val:s.scores.ha,max:10,desc:'Minor trend confirmation (2+ consecutive candles)'},
+        {name:'Failed VWAP Reclaim',val:s.scores.failedReclaim||0,max:15,desc:'Bearish penalty: price dropped below VWAP after being above'},
       ];
       html+='<div style="display:grid;gap:12px">';
       for(const b of bars){
