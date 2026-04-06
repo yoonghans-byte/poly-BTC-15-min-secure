@@ -62,8 +62,9 @@ strategy_config:
   # ── BTC 15-Minute Market Strategy ─────────────────────────────────
   btc15m:
     candleInterval: '1m'       # Binance kline interval
-    candleLimit: 50            # Number of candles to fetch
+    candleLimit: 240           # 4 hours of 1-min candles for stable indicators
     rsiPeriod: 14
+    rsiSlopePoints: 3          # RSI slope computed over last 3 values
     macdFast: 12
     macdSlow: 26
     macdSignal: 9
@@ -75,6 +76,8 @@ strategy_config:
     stopLossBps: 100
     maxHoldMinutes: 12
     candleRefreshMs: 30000     # Re-fetch Binance candles every 30 seconds
+    vwapSlopeLookback: 5       # VWAP slope over last 5 candles
+    vwapCrossLookback: 20      # VWAP crosses in last 20 candles (regime detection)
 
   # ── Copy Trading Strategy ──────────────────────────────────────────
   copy_trade:
