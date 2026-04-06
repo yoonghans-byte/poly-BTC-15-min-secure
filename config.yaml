@@ -78,6 +78,8 @@ strategy_config:
     candleRefreshMs: 30000     # Re-fetch Binance candles every 30 seconds
     vwapSlopeLookback: 5       # VWAP slope over last 5 candles
     vwapCrossLookback: 20      # VWAP crosses in last 20 candles (regime detection)
+    evExitEnabled: true        # Sell when current profit > expected resolution profit
+    evExitMinProfitBps: 30     # Min 0.3% profit before EV exit can trigger
 
   # ── Copy Trading Strategy ──────────────────────────────────────────
   copy_trade:

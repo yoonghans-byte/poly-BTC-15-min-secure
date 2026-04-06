@@ -670,7 +670,8 @@ function getStrategyCatalog(): StrategyCatalogEntry[] {
         'Before scoring, the bot detects market regime (TREND_UP/DOWN/RANGE/CHOP) and skips choppy conditions. ' +
         'The raw score is time-decayed as the market approaches expiry, then compared against the actual Polymarket market price ' +
         'with phase-gated edge thresholds (EARLY 5%, MID 10%, LATE 20%). ' +
-        'Signal-reversal exits allow the bot to flip positions when indicators reverse strongly, with no limit on flips as long as only one position is held at a time.',
+        'Signal-reversal exits allow the bot to flip positions when indicators reverse strongly, with no limit on flips as long as only one position is held at a time. ' +
+        'An EV (expected value) exit compares selling now vs holding to resolution — if current profit exceeds the expected profit from waiting, the bot locks in gains early rather than risking volatility.',
       howItWorks: [
         'Fetches the latest 240 × 1-minute BTC/USDT candles each cycle (4 hours of data)',
         'Detects market regime (TREND_UP, TREND_DOWN, RANGE, CHOP) — skips CHOP',
@@ -682,7 +683,8 @@ function getStrategyCatalog(): StrategyCatalogEntry[] {
         'Detects failed VWAP reclaim — price drops below VWAP after being above = −15 pts bearish penalty',
         'Applies time decay: score × (remainingMinutes / 15) — conviction shrinks near expiry',
         'Compares model probability vs Polymarket market price — edge must exceed phase threshold',
-        'Exits on TP/SL/time/expiry or signal reversal (allows position flip in opposite direction)',
+        'EV exit: converts score to P(win) = 0.5 + score/200 — sells when currentPrice > P(win) and profit ≥ 30 bps',
+        'Exits on TP/SL/time/expiry, EV exit, or signal reversal (allows position flip in opposite direction)',
       ],
       parameters: {
         candleInterval: '1 minute',
@@ -698,6 +700,7 @@ function getStrategyCatalog(): StrategyCatalogEntry[] {
         takeProfit: '+150 bps from entry',
         stopLoss: '−100 bps from entry',
         timeExit: '12 minutes max hold',
+        evExit: 'Sell when current profit > expected resolution profit (min 30 bps)',
         vwapSlopeLookback: '5 candles',
         vwapCrossLookback: '20 candles (for regime detection)',
       },
@@ -739,6 +742,11 @@ function getStrategyCatalog(): StrategyCatalogEntry[] {
           description: 'Exits when the TA score flips strongly in the opposite direction (past ±40 threshold). Allows re-entry in the new direction.',
           configKeys: ['score_threshold'],
         },
+        {
+          name: 'EV Exit',
+          description: 'Sells when current profit exceeds expected profit from holding to resolution. Converts the TA score to a win probability (P = 0.5 + score/200) and compares: sell now vs hold. Requires a minimum 0.3% unrealized profit before triggering.',
+          configKeys: ['ev_exit_enabled', 'ev_exit_min_profit_bps'],
+        },
       ],
       positionSizing: [
         'Fixed fraction: 5% of wallet capital per trade',
@@ -756,6 +764,7 @@ function getStrategyCatalog(): StrategyCatalogEntry[] {
         { name: 'Time Exit', description: '12-minute max hold prevents stale exposure', configKey: 'time_exit_minutes' },
         { name: 'Pre-Expiry Guard', description: 'Closes all positions ≥ 3 min before market expiry', configKey: 'min_time_remaining_ms' },
         { name: 'Signal Reversal Exit', description: 'Exits and optionally flips when indicators reverse strongly', configKey: 'score_threshold' },
+        { name: 'EV Exit', description: 'Sells when current profit > expected resolution profit — locks in gains when the market overshoots your model', configKey: 'ev_exit_enabled' },
         { name: 'Liquidity Filter', description: 'Skips markets with < $500 order-book depth', configKey: 'min_liquidity' },
         { name: 'Score Threshold', description: 'No trade unless combined indicator score exceeds ±40', configKey: 'score_threshold' },
       ],
@@ -776,6 +785,8 @@ function getStrategyCatalog(): StrategyCatalogEntry[] {
         { key: 'take_profit_bps', label: 'Take Profit', type: 'number', default: 150, unit: 'bps', description: 'Close position at this profit level', group: 'Exit' },
         { key: 'stop_loss_bps', label: 'Stop Loss', type: 'number', default: 100, unit: 'bps', description: 'Close position at this loss level', group: 'Exit' },
         { key: 'time_exit_minutes', label: 'Time Exit', type: 'number', default: 12, unit: 'min', description: 'Maximum hold time before forced exit', group: 'Exit' },
+        { key: 'ev_exit_enabled', label: 'EV Exit', type: 'boolean', default: true, description: 'Sell when current profit exceeds expected resolution profit', group: 'Exit' },
+        { key: 'ev_exit_min_profit_bps', label: 'EV Exit Min Profit', type: 'number', default: 30, unit: 'bps', description: 'Minimum unrealized profit before EV exit can trigger', group: 'Exit' },
       ],
     },
   ];

@@ -47,6 +47,8 @@ interface Btc15mParams {
   candleRefreshMs: number;
   vwapSlopeLookback: number;
   vwapCrossLookback: number;
+  evExitEnabled: boolean;
+  evExitMinProfitBps: number;
 }
 
 interface HACandle {
@@ -86,6 +88,8 @@ const DEFAULTS: Btc15mParams = {
   candleRefreshMs: 30_000,
   vwapSlopeLookback: 5,
   vwapCrossLookback: 20,
+  evExitEnabled: true,
+  evExitMinProfitBps: 30,
 };
 
 export interface Btc15mLiveState {
@@ -394,6 +398,28 @@ export class Btc15mStrategy extends BaseStrategy {
       if (!shouldExit && holdingMin > params.maxHoldMinutes) shouldExit = true;
       // Exit if market is about to expire
       if (!shouldExit && !this.hasEnoughTimeRemaining(market)) shouldExit = true;
+
+      // EV exit: sell when current profit exceeds expected profit from
+      // holding to resolution.  score → P(win) via  P = 0.5 + score/200.
+      // Sell when currentPrice > P(win) for YES, or 1-currentPrice > P(down) for NO.
+      if (!shouldExit && params.evExitEnabled && this._lastScores) {
+        const score = this._lastScores.total;
+        const pWin = pos.outcome === 'YES'
+          ? Math.max(0, Math.min(1, 0.5 + score / 200))
+          : Math.max(0, Math.min(1, 0.5 - score / 200));
+        // Current position value vs expected resolution value
+        const currentProfit = currentPrice - pos.entryPrice;
+        const expectedProfit = pWin - pos.entryPrice;
+        if (currentProfit > 0 && edgeBps >= params.evExitMinProfitBps && currentProfit > expectedProfit) {
+          logger.info(
+            { marketId: pos.marketId, outcome: pos.outcome, currentPrice: +currentPrice.toFixed(4),
+              pWin: +pWin.toFixed(3), currentProfit: +currentProfit.toFixed(4),
+              expectedProfit: +expectedProfit.toFixed(4), score },
+            'btc15m: EV exit — selling now beats holding to resolution',
+          );
+          shouldExit = true;
+        }
+      }
 
       // Signal-reversal exit: if the score has flipped strongly in the
       // opposite direction, exit now — whether at a profit or a loss.
