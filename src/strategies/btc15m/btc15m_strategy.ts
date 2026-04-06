@@ -10,11 +10,11 @@ import { logger } from '../../reporting/logs';
    Trades Polymarket's recurring "Will BTC be UP or DOWN in the
    next 15 minutes?" markets using multi-indicator TA:
 
-   • Heiken Ashi  — trend direction & consecutive candle count  (±25)
-   • RSI (14)     — momentum confirmation with slope            (±20)
-   • MACD (12/26/9) — histogram direction & crossover           (±25)
-   • VWAP position — price vs volume-weighted average            (±15)
-   • VWAP slope   — VWAP trend over last 5 candles              (±10)
+   • Heiken Ashi  — trend confirmation (minor)                  (±10)
+   • RSI (14)     — momentum confirmation with slope            (±18)
+   • MACD (12/26/9) — histogram + line level                    (±27)
+   • VWAP position — price vs volume-weighted average            (±18)
+   • VWAP slope   — VWAP trend over last 5 candles              (±18)
    • Failed VWAP reclaim — bearish penalty                       (-15)
 
    Gating layers (applied in order):
@@ -208,11 +208,11 @@ export class Btc15mStrategy extends BaseStrategy {
     }
 
     // ── Compute sub-scores ──
-    const haScore = this.scoreHeikenAshi();                        // ±25
-    const rsiScore = this.scoreRsi(closes);                        // ±20
-    const macdScore = this.scoreMacd(closes);                      // ±25
-    const vwapPosScore = this.scoreVwapPosition(vwapSeries);       // ±15
-    const vwapSlopeScore = this.scoreVwapSlope(vwapSeries);        // ±10
+    const haScore = this.scoreHeikenAshi();                        // ±10
+    const rsiScore = this.scoreRsi(closes);                        // ±18
+    const macdScore = this.scoreMacd(closes);                      // ±27
+    const vwapPosScore = this.scoreVwapPosition(vwapSeries);       // ±18
+    const vwapSlopeScore = this.scoreVwapSlope(vwapSeries);        // ±18
     const failedReclaimScore = this.scoreFailedVwapReclaim(vwapSeries); // 0 or -15
 
     const rawScore = haScore + rsiScore + macdScore + vwapPosScore + vwapSlopeScore + failedReclaimScore;
@@ -440,7 +440,7 @@ export class Btc15mStrategy extends BaseStrategy {
      Positive = bullish (UP), Negative = bearish (DOWN)
      ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */
 
-  /* ── Heiken Ashi score (±25) ────────────────────────────────── */
+  /* ── Heiken Ashi score (±10) — minor trend confirmation ──── */
 
   private scoreHeikenAshi(): number {
     const ha = this.buildHeikenAshi();
@@ -457,9 +457,9 @@ export class Btc15mStrategy extends BaseStrategy {
       consecutive++;
     }
 
-    // Cap at 5 consecutive candles, worth 5 points each
-    const capped = Math.min(consecutive, 5);
-    return lastColor * capped * 5;
+    // Only scores if 2+ consecutive same-color candles (like FrondEnt)
+    if (consecutive < 2) return 0;
+    return lastColor * 10;
   }
 
   private buildHeikenAshi(): HACandle[] {
@@ -490,7 +490,7 @@ export class Btc15mStrategy extends BaseStrategy {
     return ha;
   }
 
-  /* ── RSI score (±20) — momentum confirmation with slope ─────── */
+  /* ── RSI score (±18) — momentum confirmation with slope ─────── */
 
   private scoreRsi(closes: number[]): number {
     const rsiSeries = this.computeRsiSeries(closes, this.params.rsiPeriod, this.params.rsiSlopePoints);
@@ -499,18 +499,14 @@ export class Btc15mStrategy extends BaseStrategy {
     const rsi = rsiSeries[rsiSeries.length - 1];
     const rsiSlope = (rsiSeries[rsiSeries.length - 1] - rsiSeries[0]) / (rsiSeries.length - 1);
 
-    // Momentum confirmation: RSI trending in one direction = confirmation
-    if (rsi > 55 && rsiSlope > 0) return 20;
-    if (rsi > 55) return 8;
-    if (rsi < 45 && rsiSlope < 0) return -20;
-    if (rsi < 45) return -8;
-    // Neutral zone with slight bias
-    if (rsi >= 50 && rsiSlope > 0) return 5;
-    if (rsi < 50 && rsiSlope < 0) return -5;
+    // Momentum confirmation: both level AND slope must agree (like FrondEnt)
+    if (rsi > 55 && rsiSlope > 0) return 18;
+    if (rsi < 45 && rsiSlope < 0) return -18;
+    // No partial credit — FrondEnt only scores when both conditions hold
     return 0;
   }
 
-  /* ── MACD score (±25) ───────────────────────────────────────── */
+  /* ── MACD score (±27) — histogram direction + line level ───── */
 
   private scoreMacd(closes: number[]): number {
     const emaFast = this.computeEma(closes, this.params.macdFast);
@@ -530,49 +526,46 @@ export class Btc15mStrategy extends BaseStrategy {
     const hist = macdLine[macdLine.length - 1] - signalLine[signalLine.length - 1];
     const prevHist =
       macdLine[macdLine.length - 2] - signalLine[signalLine.length - 2];
-
-    // Cross above zero line
     const macdCurrent = macdLine[macdLine.length - 1];
-    const macdPrev = macdLine[macdLine.length - 2];
-    const bullishCross = macdPrev < 0 && macdCurrent >= 0;
-    const bearishCross = macdPrev > 0 && macdCurrent <= 0;
 
-    if (bullishCross) return 25;
-    if (bearishCross) return -25;
+    let score = 0;
 
-    // Histogram growing
-    if (hist > 0 && hist > prevHist) return 15;
-    if (hist > 0) return 8;
-    if (hist < 0 && hist < prevHist) return -15;
-    if (hist < 0) return -8;
-    return 0;
+    // Histogram direction (±18, like FrondEnt's ±2 for expanding hist)
+    const expandingGreen = hist > 0 && hist > prevHist;
+    const expandingRed = hist < 0 && hist < prevHist;
+    if (expandingGreen) score += 18;
+    else if (expandingRed) score -= 18;
+
+    // MACD line above/below zero (±9, like FrondEnt's ±1 for line level)
+    if (macdCurrent > 0) score += 9;
+    else if (macdCurrent < 0) score -= 9;
+
+    return score;
   }
 
-  /* ── VWAP position score (±15) ──────────────────────────────── */
+  /* ── VWAP position score (±18) ──────────────────────────────── */
 
   private scoreVwapPosition(vwapSeries: number[]): number {
     if (this.candles.length === 0 || vwapSeries.length === 0) return 0;
 
     const vwap = vwapSeries[vwapSeries.length - 1];
     const lastClose = this.candles[this.candles.length - 1].close;
-    const pctAbove = (lastClose - vwap) / vwap;
 
-    if (pctAbove > 0.002) return 15;
-    if (pctAbove > 0) return 8;
-    if (pctAbove < -0.002) return -15;
-    if (pctAbove < 0) return -8;
+    // Binary: above or below VWAP (like FrondEnt's ±2)
+    if (lastClose > vwap) return 18;
+    if (lastClose < vwap) return -18;
     return 0;
   }
 
-  /* ── VWAP slope score (±10) ─────────────────────────────────── */
+  /* ── VWAP slope score (±18) ─────────────────────────────────── */
 
   private scoreVwapSlope(vwapSeries: number[]): number {
     const lb = this.params.vwapSlopeLookback;
     if (vwapSeries.length < lb) return 0;
 
     const slope = vwapSeries[vwapSeries.length - 1] - vwapSeries[vwapSeries.length - lb];
-    if (slope > 0) return 10;
-    if (slope < 0) return -10;
+    if (slope > 0) return 18;
+    if (slope < 0) return -18;
     return 0;
   }
 
