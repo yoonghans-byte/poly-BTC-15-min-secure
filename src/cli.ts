@@ -1,4 +1,4 @@
-import 'dotenv/config';
+import './env_loader';
 import { Command } from 'commander';
 import fs from 'fs';
 import path from 'path';
