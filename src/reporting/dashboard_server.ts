@@ -664,26 +664,29 @@ function getStrategyCatalog(): StrategyCatalogEntry[] {
         'Trades Polymarket\'s recurring "Will BTC be UP or DOWN in the next 15 minutes?" markets using a multi-indicator technical analysis scoring system. Combines Heiken Ashi candles, RSI, MACD, and VWAP into a single directional confidence score.',
       longDescription:
         'This strategy is purpose-built for Polymarket\'s Bitcoin 15-minute direction markets. ' +
-        'Every cycle it fetches the latest 1-minute BTC/USDT candles and runs four indicators in parallel: ' +
-        'Heiken Ashi (trend direction and streak), RSI-14 (momentum and extremes), MACD 12/26/9 (crossovers and histogram growth), and VWAP (price relative to volume-weighted average). ' +
-        'Each indicator contributes a partial score on a −100 to +100 scale. When the combined score exceeds +40 the strategy buys YES (BTC UP); below −40 it buys NO (BTC DOWN). ' +
-        'Positions are sized at 5% of capital per trade and exited via take-profit (+150 bps), stop-loss (−100 bps), a 12-minute time exit, or an automatic close if fewer than 3 minutes remain before market expiry.',
+        'Every cycle it fetches the latest 240 × 1-minute BTC/USDT candles and runs six scoring components: ' +
+        'Heiken Ashi (±25), RSI-14 momentum confirmation with slope (±20), MACD 12/26/9 (±25), VWAP position (±15), VWAP slope (±10), and failed VWAP reclaim (−15). ' +
+        'The raw score is time-decayed as the market approaches expiry, then gated by regime detection (skip CHOP markets) and edge-vs-market-price comparison (phase-gated: EARLY 5%, MID 10%, LATE 20%). ' +
+        'Signal-reversal exits allow the bot to flip positions when indicators reverse strongly.',
       howItWorks: [
-        'Fetches the latest 50 × 1-minute BTC/USDT candles each cycle',
-        'Computes Heiken Ashi candles and counts consecutive same-direction bars (up to ±30 pts)',
-        'Calculates RSI-14: scores ±25 pts, with reversal signals at overbought/oversold extremes',
+        'Fetches the latest 240 × 1-minute BTC/USDT candles each cycle (4 hours of data)',
+        'Detects market regime (TREND_UP, TREND_DOWN, RANGE, CHOP) — skips CHOP',
+        'Computes Heiken Ashi candles and counts consecutive same-direction bars (up to ±25 pts)',
+        'Calculates RSI-14 with slope: momentum confirmation style (±20 pts)',
         'Runs MACD 12/26/9: crossovers contribute ±25 pts, histogram growth adds ±8–15 pts',
-        'Checks price vs VWAP: above = +20 pts bullish, below = −20 pts bearish',
-        'Sums all scores → if > +40 buy YES (UP), if < −40 buy NO (DOWN), else hold',
-        'Sizes each position at 5% of wallet capital',
-        'Exits on take-profit (+150 bps), stop-loss (−100 bps), 12-min time limit, or pre-expiry close',
+        'Checks price vs VWAP position (±15 pts) and VWAP slope (±10 pts)',
+        'Detects failed VWAP reclaim: price drops below VWAP after being above (−15 pts bearish)',
+        'Applies time decay: conviction shrinks as market approaches expiry',
+        'Compares model probability vs market price — requires edge threshold by phase',
+        'Exits on TP/SL/time/expiry or signal reversal (allows position flip)',
       ],
       parameters: {
         candleInterval: '1 minute',
-        candleLimit: '50 candles lookback',
-        rsiPeriod: '14',
+        candleLimit: '240 candles lookback (4 hours)',
+        rsiPeriod: '14 (with 3-point slope)',
         macd: '12 / 26 / 9 (fast / slow / signal)',
-        scoreThreshold: '40 — minimum score magnitude to enter',
+        scoreThreshold: '40 — minimum |score| to trade',
+        edgeThreshold: 'EARLY: 5%, MID: 10%, LATE: 20%',
         positionSizePct: '5% of wallet capital per trade',
         minLiquidity: '$500 minimum order-book depth',
         minTimeRemaining: '3 minutes before expiry',
@@ -691,15 +694,16 @@ function getStrategyCatalog(): StrategyCatalogEntry[] {
         stopLoss: '−100 bps from entry',
         timeExit: '12 minutes max hold',
       },
-      idealFor: 'Traders who want short-term, technically-driven directional exposure on Bitcoin price markets',
+      idealFor: 'Traders who want short-term, technically-driven directional exposure on Bitcoin price markets with regime awareness and edge gating',
       entryLogic: [
         'Checks that the market has at least $500 liquidity and ≥ 3 minutes until expiry',
-        'Fetches 50 × 1-min BTC/USDT candles and computes all four indicators',
-        'Sums partial scores: Heiken Ashi (±30) + RSI (±25) + MACD (±25) + VWAP (±20)',
-        'Score > +40 → BUY YES (betting BTC goes UP in next 15 min)',
-        'Score < −40 → BUY NO (betting BTC goes DOWN in next 15 min)',
-        'Confidence = |score| / 100; edge used for Kelly-style logging (not re-sizing)',
-        'Skips entry if score is between −40 and +40 (no clear signal)',
+        'Detects market regime — skips entry in CHOP (low volume, flat price near VWAP)',
+        'Fetches 240 × 1-min BTC/USDT candles and computes six scoring components',
+        'Sums partial scores: HA (±25) + RSI (±20) + MACD (±25) + VWAP pos (±15) + VWAP slope (±10) + failed reclaim (−15)',
+        'Applies time decay: score × (remainingMinutes / 15)',
+        'Score > +40 → model says UP; Score < −40 → model says DOWN',
+        'Compares model probability vs Polymarket market price — requires edge ≥ phase threshold',
+        'Skips if edge is insufficient (market has already priced it in)',
       ],
       exitRules: [
         {

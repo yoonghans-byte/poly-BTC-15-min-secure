@@ -4,44 +4,36 @@ import { fetchBtcCandles, BinanceCandle } from '../../data/binance_feed';
 import { logger } from '../../reporting/logs';
 
 /* ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-   BTC 15-Minute Market Strategy
+   BTC 15-Minute Market Strategy  (v2 — FrondEnt-aligned)
    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
    Trades Polymarket's recurring "Will BTC be UP or DOWN in the
    next 15 minutes?" markets using multi-indicator TA:
 
-   • Heiken Ashi  — trend direction & consecutive candle count
-   • RSI (14)     — momentum / overbought / oversold
-   • MACD (12/26/9) — histogram direction & crossover
-   • VWAP         — price vs volume-weighted average
+   • Heiken Ashi  — trend direction & consecutive candle count  (±25)
+   • RSI (14)     — momentum confirmation with slope            (±20)
+   • MACD (12/26/9) — histogram direction & crossover           (±25)
+   • VWAP position — price vs volume-weighted average            (±15)
+   • VWAP slope   — VWAP trend over last 5 candles              (±10)
+   • Failed VWAP reclaim — bearish penalty                       (-15)
 
-   Combined score (-100 → +100):
+   Gating layers (applied in order):
+   1. Regime filter — skip CHOP markets
+   2. Score threshold — |score| must exceed 40
+   3. Time decay — conviction shrinks as market approaches expiry
+   4. Edge vs market — model probability must exceed market price
+      by a phase-gated threshold (EARLY 5%, MID 10%, LATE 20%)
+
+   Combined score (-95 → +95 pre-decay, time-decayed toward 0):
      > +THRESHOLD  → BUY YES (UP)
      < -THRESHOLD  → BUY NO  (DOWN)
-
-   Configuration (via strategyConfig.btc15m in config.yaml):
-   {
-     candleInterval: '1m',          // Binance kline interval
-     candleLimit: 50,               // Candles to fetch
-     rsiPeriod: 14,
-     macdFast: 12,
-     macdSlow: 26,
-     macdSignal: 9,
-     scoreThreshold: 40,            // Min |score| to trade (0–100)
-     minLiquidity: 500,             // Skip illiquid markets
-     minTimeRemainingMs: 180000,    // Don't enter < 3 min before expiry
-     positionSizePct: 0.05,         // % of capital per position
-     takeProfitBps: 150,
-     stopLossBps: 100,
-     maxHoldMinutes: 12,
-     candleRefreshMs: 30000,        // How often to re-fetch Binance candles
-   }
    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */
 
 interface Btc15mParams {
   candleInterval: string;
   candleLimit: number;
   rsiPeriod: number;
+  rsiSlopePoints: number;
   macdFast: number;
   macdSlow: number;
   macdSignal: number;
@@ -53,6 +45,8 @@ interface Btc15mParams {
   stopLossBps: number;
   maxHoldMinutes: number;
   candleRefreshMs: number;
+  vwapSlopeLookback: number;
+  vwapCrossLookback: number;
 }
 
 interface HACandle {
@@ -72,10 +66,13 @@ interface Btc15mPosition {
   peakBps: number;
 }
 
+type Regime = 'TREND_UP' | 'TREND_DOWN' | 'RANGE' | 'CHOP';
+
 const DEFAULTS: Btc15mParams = {
   candleInterval: '1m',
-  candleLimit: 50,
+  candleLimit: 240,
   rsiPeriod: 14,
+  rsiSlopePoints: 3,
   macdFast: 12,
   macdSlow: 26,
   macdSignal: 9,
@@ -87,15 +84,22 @@ const DEFAULTS: Btc15mParams = {
   stopLossBps: 100,
   maxHoldMinutes: 12,
   candleRefreshMs: 30_000,
+  vwapSlopeLookback: 5,
+  vwapCrossLookback: 20,
 };
 
 export interface Btc15mLiveState {
   activeMarket: { slug: string; marketId: string; question: string; endDate?: string; liquidity: number } | null;
   candles: number;
   lastCandleFetch: number;
-  scores: { ha: number; rsi: number; macd: number; vwap: number; total: number } | null;
+  scores: {
+    ha: number; rsi: number; macd: number;
+    vwap: number; vwapSlope: number; failedReclaim: number;
+    raw: number; timeDecay: number; total: number;
+  } | null;
+  regime: Regime | null;
   threshold: number;
-  decision: 'BUY YES (UP)' | 'BUY NO (DOWN)' | 'NO TRADE' | 'NO MARKET' | 'WAITING FOR CANDLES';
+  decision: 'BUY YES (UP)' | 'BUY NO (DOWN)' | 'NO TRADE' | 'NO MARKET' | 'WAITING FOR CANDLES' | 'CHOP_SKIP' | 'EDGE_SKIP';
   positions: Btc15mPosition[];
   lastUpdate: number;
 }
@@ -115,6 +119,7 @@ export class Btc15mStrategy extends BaseStrategy {
   private _lastScores: Btc15mLiveState['scores'] = null;
   private _lastDecision: Btc15mLiveState['decision'] = 'WAITING FOR CANDLES';
   private _lastMarket: Btc15mLiveState['activeMarket'] = null;
+  private _lastRegime: Regime | null = null;
 
   /** Expose live state for the dashboard */
   getLiveState(): Btc15mLiveState {
@@ -123,6 +128,7 @@ export class Btc15mStrategy extends BaseStrategy {
       candles: this.candles.length,
       lastCandleFetch: this.lastCandleFetch,
       scores: this._lastScores,
+      regime: this._lastRegime,
       threshold: this.params.scoreThreshold,
       decision: this._lastDecision,
       positions: [...this.positions],
@@ -171,6 +177,7 @@ export class Btc15mStrategy extends BaseStrategy {
     if (!market) {
       this._lastMarket = null;
       this._lastScores = null;
+      this._lastRegime = null;
       this._lastDecision = 'NO MARKET';
       return [];
     }
@@ -188,19 +195,62 @@ export class Btc15mStrategy extends BaseStrategy {
     }
 
     const closes = this.candles.map((c) => c.close);
-    const haScore = this.scoreHeikenAshi();
-    const rsiScore = this.scoreRsi(closes);
-    const macdScore = this.scoreMacd(closes);
-    const vwapScore = this.scoreVwap();
-    const score = haScore + rsiScore + macdScore + vwapScore;
+    const vwapSeries = this.computeVwapSeries();
 
-    this._lastScores = { ha: haScore, rsi: rsiScore, macd: macdScore, vwap: vwapScore, total: score };
+    // ── Gate 1: Regime filter ──
+    const regime = this.detectRegime(vwapSeries);
+    this._lastRegime = regime.regime;
+    if (regime.regime === 'CHOP') {
+      this._lastDecision = 'CHOP_SKIP';
+      this._lastScores = null;
+      logger.info({ regime: regime.regime, reason: regime.reason }, 'btc15m: CHOP regime — skipping');
+      return [];
+    }
 
-    logger.info({ ha: haScore, rsi: rsiScore, macd: macdScore, vwap: vwapScore, total: score, threshold: this.params.scoreThreshold, market: market.slug }, 'btc15m score breakdown');
+    // ── Compute sub-scores ──
+    const haScore = this.scoreHeikenAshi();                        // ±25
+    const rsiScore = this.scoreRsi(closes);                        // ±20
+    const macdScore = this.scoreMacd(closes);                      // ±25
+    const vwapPosScore = this.scoreVwapPosition(vwapSeries);       // ±15
+    const vwapSlopeScore = this.scoreVwapSlope(vwapSeries);        // ±10
+    const failedReclaimScore = this.scoreFailedVwapReclaim(vwapSeries); // 0 or -15
 
+    const rawScore = haScore + rsiScore + macdScore + vwapPosScore + vwapSlopeScore + failedReclaimScore;
+
+    // ── Gate 2: Time decay ──
+    const timeDecay = this.computeTimeDecay(market);
+    const score = Math.round(rawScore * timeDecay);
+
+    this._lastScores = {
+      ha: haScore, rsi: rsiScore, macd: macdScore,
+      vwap: vwapPosScore, vwapSlope: vwapSlopeScore,
+      failedReclaim: failedReclaimScore,
+      raw: rawScore, timeDecay, total: score,
+    };
+
+    logger.info({
+      ...this._lastScores, regime: regime.regime,
+      threshold: this.params.scoreThreshold, market: market.slug,
+    }, 'btc15m score breakdown');
+
+    // ── Gate 3: Score threshold ──
     const absScore = Math.abs(score);
     if (absScore < this.params.scoreThreshold) {
       this._lastDecision = 'NO TRADE';
+      return [];
+    }
+
+    // ── Gate 4: Edge vs market price ──
+    const remainingMinutes = market.endDate
+      ? (new Date(market.endDate).getTime() - Date.now()) / 60_000
+      : 15;
+    const edgeInfo = this.computeEdgeVsMarket(score, market, remainingMinutes);
+    if (!edgeInfo.pass) {
+      this._lastDecision = 'EDGE_SKIP';
+      logger.info({
+        edge: edgeInfo.edge.toFixed(4), phase: edgeInfo.phase,
+        modelProb: edgeInfo.modelProb.toFixed(4), threshold: edgeInfo.threshold.toFixed(4),
+      }, 'btc15m: insufficient edge vs market');
       return [];
     }
 
@@ -223,7 +273,7 @@ export class Btc15mStrategy extends BaseStrategy {
     this._lastDecision = score > 0 ? 'BUY YES (UP)' : 'BUY NO (DOWN)';
 
     const confidence = Math.min(0.90, 0.40 + (absScore / 200));
-    const edge = Math.min(0.08, absScore / 1_250);
+    const edge = Math.max(edgeInfo.edge, Math.min(0.08, absScore / 1_250));
 
     if (score > 0) {
       return [{
@@ -360,7 +410,7 @@ export class Btc15mStrategy extends BaseStrategy {
             'btc15m: signal reversal — exiting position',
           );
           shouldExit = true;
-          // Allow one re-entry in the opposite direction
+          // Allow re-entry in the opposite direction
           this.reversalExitMarkets.add(pos.marketId);
         }
       }
@@ -386,22 +436,11 @@ export class Btc15mStrategy extends BaseStrategy {
   }
 
   /* ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-     TA Scoring Engine  (returns -100 to +100)
+     TA Scoring Engine
      Positive = bullish (UP), Negative = bearish (DOWN)
      ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */
 
-  private computeScore(): number {
-    const closes = this.candles.map((c) => c.close);
-
-    const haScore = this.scoreHeikenAshi();       // ±30
-    const rsiScore = this.scoreRsi(closes);       // ±25
-    const macdScore = this.scoreMacd(closes);     // ±25
-    const vwapScore = this.scoreVwap();           // ±20
-
-    return haScore + rsiScore + macdScore + vwapScore;
-  }
-
-  /* ── Heiken Ashi score (±30) ────────────────────────────────── */
+  /* ── Heiken Ashi score (±25) ────────────────────────────────── */
 
   private scoreHeikenAshi(): number {
     const ha = this.buildHeikenAshi();
@@ -418,8 +457,8 @@ export class Btc15mStrategy extends BaseStrategy {
       consecutive++;
     }
 
-    // Cap at 6 consecutive candles, worth 5 points each
-    const capped = Math.min(consecutive, 6);
+    // Cap at 5 consecutive candles, worth 5 points each
+    const capped = Math.min(consecutive, 5);
     return lastColor * capped * 5;
   }
 
@@ -451,17 +490,24 @@ export class Btc15mStrategy extends BaseStrategy {
     return ha;
   }
 
-  /* ── RSI score (±25) ────────────────────────────────────────── */
+  /* ── RSI score (±20) — momentum confirmation with slope ─────── */
 
   private scoreRsi(closes: number[]): number {
-    const rsi = this.computeRsi(closes, this.params.rsiPeriod);
+    const rsiSeries = this.computeRsiSeries(closes, this.params.rsiPeriod, this.params.rsiSlopePoints);
+    if (rsiSeries.length < 2) return 0;
 
-    if (rsi >= 70) return -25;
-    if (rsi >= 60) return -10;
-    if (rsi <= 30) return 25;
-    if (rsi <= 40) return 10;
-    // Neutral zone 40–60: slight directional bias
-    return rsi < 50 ? 5 : -5;
+    const rsi = rsiSeries[rsiSeries.length - 1];
+    const rsiSlope = (rsiSeries[rsiSeries.length - 1] - rsiSeries[0]) / (rsiSeries.length - 1);
+
+    // Momentum confirmation: RSI trending in one direction = confirmation
+    if (rsi > 55 && rsiSlope > 0) return 20;
+    if (rsi > 55) return 8;
+    if (rsi < 45 && rsiSlope < 0) return -20;
+    if (rsi < 45) return -8;
+    // Neutral zone with slight bias
+    if (rsi >= 50 && rsiSlope > 0) return 5;
+    if (rsi < 50 && rsiSlope < 0) return -5;
+    return 0;
   }
 
   /* ── MACD score (±25) ───────────────────────────────────────── */
@@ -502,30 +548,149 @@ export class Btc15mStrategy extends BaseStrategy {
     return 0;
   }
 
-  /* ── VWAP score (±20) ───────────────────────────────────────── */
+  /* ── VWAP position score (±15) ──────────────────────────────── */
 
-  private scoreVwap(): number {
-    if (this.candles.length === 0) return 0;
+  private scoreVwapPosition(vwapSeries: number[]): number {
+    if (this.candles.length === 0 || vwapSeries.length === 0) return 0;
 
-    let sumPV = 0;
-    let sumV = 0;
-    for (const c of this.candles) {
-      const typical = (c.high + c.low + c.close) / 3;
-      sumPV += typical * c.volume;
-      sumV += c.volume;
-    }
-    if (sumV === 0) return 0;
-
-    const vwap = sumPV / sumV;
+    const vwap = vwapSeries[vwapSeries.length - 1];
     const lastClose = this.candles[this.candles.length - 1].close;
     const pctAbove = (lastClose - vwap) / vwap;
 
-    // Price clearly above VWAP = bullish
-    if (pctAbove > 0.002) return 20;
-    if (pctAbove > 0) return 10;
-    if (pctAbove < -0.002) return -20;
-    if (pctAbove < 0) return -10;
+    if (pctAbove > 0.002) return 15;
+    if (pctAbove > 0) return 8;
+    if (pctAbove < -0.002) return -15;
+    if (pctAbove < 0) return -8;
     return 0;
+  }
+
+  /* ── VWAP slope score (±10) ─────────────────────────────────── */
+
+  private scoreVwapSlope(vwapSeries: number[]): number {
+    const lb = this.params.vwapSlopeLookback;
+    if (vwapSeries.length < lb) return 0;
+
+    const slope = vwapSeries[vwapSeries.length - 1] - vwapSeries[vwapSeries.length - lb];
+    if (slope > 0) return 10;
+    if (slope < 0) return -10;
+    return 0;
+  }
+
+  /* ── Failed VWAP reclaim (0 or -15, bearish only) ───────────── */
+
+  private scoreFailedVwapReclaim(vwapSeries: number[]): number {
+    if (this.candles.length < 3 || vwapSeries.length < 3) return 0;
+
+    const n = this.candles.length;
+    const prevClose = this.candles[n - 2].close;
+    const currClose = this.candles[n - 1].close;
+    const prevVwap = vwapSeries[vwapSeries.length - 2];
+    const currVwap = vwapSeries[vwapSeries.length - 1];
+
+    // Was above VWAP last candle, now dropped below
+    if (prevClose > prevVwap && currClose < currVwap) return -15;
+    return 0;
+  }
+
+  /* ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+     Gating Engines
+     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */
+
+  /* ── Regime detection ───────────────────────────────────────── */
+
+  private detectRegime(vwapSeries: number[]): { regime: Regime; reason: string } {
+    if (this.candles.length < 20 || vwapSeries.length < this.params.vwapSlopeLookback) {
+      return { regime: 'CHOP', reason: 'insufficient_data' };
+    }
+
+    const lastClose = this.candles[this.candles.length - 1].close;
+    const vwap = vwapSeries[vwapSeries.length - 1];
+    const lb = this.params.vwapSlopeLookback;
+    const vwapSlope = vwapSeries[vwapSeries.length - 1] - vwapSeries[vwapSeries.length - lb];
+    const above = lastClose > vwap;
+
+    // Volume check: recent 20 candles vs average of last 120
+    const recentVol = this.candles.slice(-20).reduce((a, c) => a + c.volume, 0);
+    const histLen = Math.min(this.candles.length, 120);
+    const avgVol = this.candles.slice(-histLen).reduce((a, c) => a + c.volume, 0) * (20 / histLen);
+    const lowVolume = recentVol < 0.6 * avgVol;
+
+    if (lowVolume && Math.abs((lastClose - vwap) / vwap) < 0.001) {
+      return { regime: 'CHOP', reason: 'low_volume_flat' };
+    }
+
+    if (above && vwapSlope > 0) return { regime: 'TREND_UP', reason: 'price_above_vwap_slope_up' };
+    if (!above && vwapSlope < 0) return { regime: 'TREND_DOWN', reason: 'price_below_vwap_slope_down' };
+
+    // VWAP cross counting
+    const closes = this.candles.map((c) => c.close);
+    const crossLb = Math.min(this.params.vwapCrossLookback, closes.length, vwapSeries.length);
+    if (crossLb >= 2) {
+      let crosses = 0;
+      const startIdx = closes.length - crossLb;
+      for (let i = startIdx + 1; i < closes.length; i++) {
+        const prev = closes[i - 1] - vwapSeries[i - 1];
+        const cur = closes[i] - vwapSeries[i];
+        if ((prev > 0 && cur < 0) || (prev < 0 && cur > 0)) crosses++;
+      }
+      if (crosses >= 3) return { regime: 'RANGE', reason: 'frequent_vwap_cross' };
+    }
+
+    return { regime: 'RANGE', reason: 'default' };
+  }
+
+  /* ── Time decay ─────────────────────────────────────────────── */
+
+  private computeTimeDecay(market: MarketData): number {
+    if (!market.endDate) return 1;
+    const remainingMs = new Date(market.endDate).getTime() - Date.now();
+    const remainingMinutes = remainingMs / 60_000;
+    return Math.max(0, Math.min(1, remainingMinutes / 15));
+  }
+
+  /* ── Edge vs market price ───────────────────────────────────── */
+
+  private computeEdgeVsMarket(
+    score: number,
+    market: MarketData,
+    remainingMinutes: number,
+  ): { pass: boolean; edge: number; phase: string; modelProb: number; threshold: number } {
+    // Convert score (-100..+100) to a probability (0..1)
+    const rawUp = 0.5 + (score / 200);
+    const modelUp = Math.max(0.01, Math.min(0.99, rawUp));
+    const modelDown = 1 - modelUp;
+
+    // Market prices for YES (UP) and NO (DOWN)
+    const marketUp = market.outcomePrices[0];
+    const marketDown = market.outcomePrices[1] ?? (1 - marketUp);
+
+    const edgeUp = modelUp - marketUp;
+    const edgeDown = modelDown - marketDown;
+
+    const phase = remainingMinutes > 10 ? 'EARLY' : remainingMinutes > 5 ? 'MID' : 'LATE';
+    const threshold = phase === 'EARLY' ? 0.05 : phase === 'MID' ? 0.10 : 0.20;
+
+    const bestEdge = score > 0 ? edgeUp : edgeDown;
+    const pass = bestEdge >= threshold;
+
+    return { pass, edge: bestEdge, phase, modelProb: score > 0 ? modelUp : modelDown, threshold };
+  }
+
+  /* ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+     VWAP helpers
+     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */
+
+  private computeVwapSeries(): number[] {
+    const series: number[] = [];
+    let sumPV = 0;
+    let sumV = 0;
+    for (const c of this.candles) {
+      const tp = (c.high + c.low + c.close) / 3;
+      sumPV += tp * c.volume;
+      sumV += c.volume;
+      series.push(sumV === 0 ? 0 : sumPV / sumV);
+    }
+    return series;
   }
 
   /* ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -604,5 +769,15 @@ export class Btc15mStrategy extends BaseStrategy {
     const avgLoss = losses / period;
     if (avgLoss === 0) return 100;
     return 100 - 100 / (1 + avgGain / avgLoss);
+  }
+
+  private computeRsiSeries(closes: number[], period: number, count: number): number[] {
+    const series: number[] = [];
+    for (let offset = count - 1; offset >= 0; offset--) {
+      const slice = closes.slice(0, closes.length - offset);
+      if (slice.length < period + 1) continue;
+      series.push(this.computeRsi(slice, period));
+    }
+    return series;
   }
 }
