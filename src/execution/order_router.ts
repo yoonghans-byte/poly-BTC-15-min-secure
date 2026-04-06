@@ -24,19 +24,24 @@ export class OrderRouter {
     }
 
     const state = wallet.getState();
-    const risk = this.riskEngine.check(order, state);
-    if (!risk.ok) {
-      logger.warn({ walletId: order.walletId, reason: risk.reason }, 'Risk check failed');
-      consoleLog.warn('RISK', `Risk rejected: ${risk.reason} [${order.walletId}] ${order.side} ${order.outcome} ×${order.size}`, {
-        walletId: order.walletId,
-        marketId: order.marketId,
-        reason: risk.reason,
-        side: order.side,
-        outcome: order.outcome,
-        price: order.price,
-        size: order.size,
-      });
-      return false;
+
+    // SELL / exit orders must NEVER be blocked by risk checks — we must
+    // always be able to close positions to limit losses.
+    if (order.side !== 'SELL') {
+      const risk = this.riskEngine.check(order, state);
+      if (!risk.ok) {
+        logger.warn({ walletId: order.walletId, reason: risk.reason }, 'Risk check failed');
+        consoleLog.warn('RISK', `Risk rejected: ${risk.reason} [${order.walletId}] ${order.side} ${order.outcome} ×${order.size}`, {
+          walletId: order.walletId,
+          marketId: order.marketId,
+          reason: risk.reason,
+          side: order.side,
+          outcome: order.outcome,
+          price: order.price,
+          size: order.size,
+        });
+        return false;
+      }
     }
 
     await this.tradeExecutor.execute(order, wallet);

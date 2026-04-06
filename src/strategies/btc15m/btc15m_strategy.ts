@@ -1,6 +1,7 @@
 import { BaseStrategy, StrategyContext } from '../strategy_interface';
 import { Signal, MarketData, OrderRequest } from '../../types';
 import { fetchBtcCandles, BinanceCandle } from '../../data/binance_feed';
+import { logger } from '../../reporting/logs';
 
 /* ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
    BTC 15-Minute Market Strategy
@@ -88,6 +89,17 @@ const DEFAULTS: Btc15mParams = {
   candleRefreshMs: 30_000,
 };
 
+export interface Btc15mLiveState {
+  activeMarket: { slug: string; marketId: string; question: string; endDate?: string; liquidity: number } | null;
+  candles: number;
+  lastCandleFetch: number;
+  scores: { ha: number; rsi: number; macd: number; vwap: number; total: number } | null;
+  threshold: number;
+  decision: 'BUY YES (UP)' | 'BUY NO (DOWN)' | 'NO TRADE' | 'NO MARKET' | 'WAITING FOR CANDLES';
+  positions: Btc15mPosition[];
+  lastUpdate: number;
+}
+
 export class Btc15mStrategy extends BaseStrategy {
   readonly name = 'btc15m';
   protected override cooldownMs = 60_000;
@@ -96,6 +108,25 @@ export class Btc15mStrategy extends BaseStrategy {
   private candles: BinanceCandle[] = [];
   private lastCandleFetch = 0;
   private positions: Btc15mPosition[] = [];
+  /** Markets we've already traded — no re-entry after exit */
+  private tradedMarkets = new Set<string>();
+  private _lastScores: Btc15mLiveState['scores'] = null;
+  private _lastDecision: Btc15mLiveState['decision'] = 'WAITING FOR CANDLES';
+  private _lastMarket: Btc15mLiveState['activeMarket'] = null;
+
+  /** Expose live state for the dashboard */
+  getLiveState(): Btc15mLiveState {
+    return {
+      activeMarket: this._lastMarket,
+      candles: this.candles.length,
+      lastCandleFetch: this.lastCandleFetch,
+      scores: this._lastScores,
+      threshold: this.params.scoreThreshold,
+      decision: this._lastDecision,
+      positions: [...this.positions],
+      lastUpdate: Date.now(),
+    };
+  }
 
   /* ── Lifecycle ──────────────────────────────────────────────── */
 
@@ -122,9 +153,7 @@ export class Btc15mStrategy extends BaseStrategy {
       const msg = err instanceof Error ? err.message : String(err);
       if (this.lastCandleFetch > 0) {
         // Only warn if we had candles before — avoids noise on first fetch
-        import('../../reporting/logs').then(({ logger }) => {
-          logger.warn({ error: msg, staleSeconds: staleSecs }, 'BTC candle fetch failed — using stale data');
-        }).catch(() => {});
+        logger.warn({ error: msg, staleSeconds: staleSecs }, 'BTC candle fetch failed — using stale data');
       }
     }
   }
@@ -137,15 +166,49 @@ export class Btc15mStrategy extends BaseStrategy {
     }
 
     const market = this.findActiveBtcMarket();
-    if (!market) return [];
-    if (!this.hasEnoughTimeRemaining(market)) return [];
+    if (!market) {
+      this._lastMarket = null;
+      this._lastScores = null;
+      this._lastDecision = 'NO MARKET';
+      return [];
+    }
+    this._lastMarket = {
+      slug: market.slug ?? '',
+      marketId: market.marketId,
+      question: market.question ?? '',
+      endDate: market.endDate,
+      liquidity: market.liquidity,
+    };
+    if (!this.hasEnoughTimeRemaining(market)) {
+      this._lastDecision = 'NO TRADE';
+      this._lastScores = null;
+      return [];
+    }
 
-    const score = this.computeScore();
+    const closes = this.candles.map((c) => c.close);
+    const haScore = this.scoreHeikenAshi();
+    const rsiScore = this.scoreRsi(closes);
+    const macdScore = this.scoreMacd(closes);
+    const vwapScore = this.scoreVwap();
+    const score = haScore + rsiScore + macdScore + vwapScore;
+
+    this._lastScores = { ha: haScore, rsi: rsiScore, macd: macdScore, vwap: vwapScore, total: score };
+
+    logger.info({ ha: haScore, rsi: rsiScore, macd: macdScore, vwap: vwapScore, total: score, threshold: this.params.scoreThreshold, market: market.slug }, 'btc15m score breakdown');
+
     const absScore = Math.abs(score);
-    if (absScore < this.params.scoreThreshold) return [];
+    if (absScore < this.params.scoreThreshold) {
+      this._lastDecision = 'NO TRADE';
+      return [];
+    }
 
-    // Already holding a position in this market
-    if (this.positions.some((p) => p.marketId === market.marketId)) return [];
+    // Already holding a position or already traded this market
+    if (this.positions.some((p) => p.marketId === market.marketId) || this.tradedMarkets.has(market.marketId)) {
+      this._lastDecision = score > 0 ? 'BUY YES (UP)' : 'BUY NO (DOWN)';
+      return [];
+    }
+
+    this._lastDecision = score > 0 ? 'BUY YES (UP)' : 'BUY NO (DOWN)';
 
     const confidence = Math.min(0.90, 0.40 + (absScore / 200));
     const edge = Math.min(0.08, absScore / 1_250);
@@ -177,13 +240,13 @@ export class Btc15mStrategy extends BaseStrategy {
 
     return signals.map((signal) => {
       const market = this.markets.get(signal.marketId);
-      const baseSize = capital * this.params.positionSizePct * signal.confidence;
-      const maxFromLiquidity = (market?.liquidity ?? 500) * 0.005;
-      const size = Math.max(1, Math.floor(Math.min(baseSize, maxFromLiquidity, 50)));
-
       const currentPrice = signal.outcome === 'YES'
         ? (market?.outcomePrices[0] ?? 0.5)
         : (market?.outcomePrices[1] ?? 0.5);
+      const dollarSize = capital * this.params.positionSizePct * signal.confidence;
+      const shares = Math.floor(dollarSize / Math.max(currentPrice, 0.01));
+      const maxFromLiquidity = Math.floor((market?.liquidity ?? 500) * 0.005);
+      const size = Math.max(5, Math.min(shares, maxFromLiquidity, 100));
 
       return {
         walletId,
@@ -201,6 +264,7 @@ export class Btc15mStrategy extends BaseStrategy {
 
   override notifyFill(order: OrderRequest): void {
     if (order.strategy !== this.name) return;
+    this.tradedMarkets.add(order.marketId);
     this.positions.push({
       marketId: order.marketId,
       outcome: order.outcome,
@@ -218,10 +282,36 @@ export class Btc15mStrategy extends BaseStrategy {
     const { params } = this;
     const toRemove: number[] = [];
 
+    if (this.positions.length > 0) {
+      for (const pos of this.positions) {
+        const m = this.markets.get(pos.marketId);
+        logger.info({ marketId: pos.marketId, hasMarket: !!m, endDate: m?.endDate, expired: m?.endDate ? new Date(m.endDate).getTime() < Date.now() : 'n/a', posCount: this.positions.length }, 'btc15m: managePositions checking');
+      }
+    }
+
     for (let i = 0; i < this.positions.length; i++) {
       const pos = this.positions[i];
       const market = this.markets.get(pos.marketId);
-      if (!market) continue;
+
+      // If market is gone from cache or has expired, let reconciliation handle it.
+      // Don't submit a SELL order with price=0 — the wallet's reconcileExpiredPositions()
+      // will fetch the actual resolution from Gamma API and calculate PnL correctly.
+      if (!market) {
+        logger.warn({ marketId: pos.marketId, outcome: pos.outcome, entryPrice: pos.entryPrice, size: pos.size }, 'btc15m: position on missing market — removing from strategy tracker (wallet reconciliation will handle PnL)');
+        toRemove.push(i);
+        continue;
+      }
+
+      // If market has expired (endDate in the past), remove from strategy tracker.
+      // Wallet reconciliation will determine WIN/LOSS from Gamma API.
+      if (market.endDate) {
+        const endMs = new Date(market.endDate).getTime();
+        if (endMs < Date.now()) {
+          logger.warn({ marketId: pos.marketId, slug: market.slug, outcome: pos.outcome, entryPrice: pos.entryPrice, size: pos.size }, 'btc15m: market expired — removing from strategy tracker (wallet reconciliation will handle PnL)');
+          toRemove.push(i);
+          continue;
+        }
+      }
 
       const currentPrice = pos.outcome === 'YES'
         ? market.outcomePrices[0]

@@ -7,10 +7,10 @@ wallets:
     strategy: btc15m
     capital: 20
     risk_limits:
-      max_position_size: 4
-      max_exposure_per_market: 8
+      max_position_size: 10
+      max_exposure_per_market: 15
       max_daily_loss: 5
-      max_open_trades: 2
+      max_open_trades: 5
       max_drawdown: 0.25
 
 

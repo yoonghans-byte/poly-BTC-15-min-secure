@@ -12,6 +12,7 @@ import { OrderRouter } from './execution/order_router';
 import { Engine } from './core/engine';
 import { listStrategies } from './strategies/registry';
 import { computeAllPerformance } from './reporting/performance';
+import { Database } from './storage/database';
 import { logger } from './reporting/logs';
 import { DashboardServer } from './reporting/dashboard_server';
 import { WhaleService } from './whales/whale_service';
@@ -213,9 +214,26 @@ program
   .action(async (options: { config: string }) => {
     validateEnv(); // L-3: Validate env vars before anything else
     const config = loadConfig(options.config);
+
+    // Load persisted wallet state from disk (survives restarts)
+    const db = new Database();
+    await db.connect();
+    const savedStates = await db.loadWallets();
+    const savedStateMap = new Map(savedStates.map((s) => [s.walletId, s]));
+
+    const savedTrades = await db.loadTrades();
+
     const walletManager = new WalletManager();
     for (const wallet of config.wallets) {
-      walletManager.registerWallet(wallet, wallet.strategy, config.environment.enableLiveTrading);
+      walletManager.registerWallet(wallet, wallet.strategy, config.environment.enableLiveTrading, savedStateMap.get(wallet.id));
+      // Restore trade history
+      const trades = savedTrades.get(wallet.id);
+      if (trades && trades.length > 0) {
+        const w = walletManager.getWallet(wallet.id);
+        if (w && typeof (w as any).restoreTradeHistory === 'function') {
+          (w as any).restoreTradeHistory(trades);
+        }
+      }
     }
     const dashboardPort = Number(process.env.DASHBOARD_PORT ?? 3000);
     const dashboardServer = new DashboardServer(walletManager, dashboardPort);

@@ -5,6 +5,7 @@ import { OrderRouter } from '../execution/order_router';
 import { StrategyInterface } from '../strategies/strategy_interface';
 import { STRATEGY_REGISTRY } from '../strategies/registry';
 import { AppConfig, MarketData } from '../types';
+import { Database } from '../storage/database';
 import { logger } from '../reporting/logs';
 import { consoleLog } from '../reporting/console_log';
 
@@ -19,6 +20,7 @@ export class Engine {
   private readonly stream: OrderbookStream;
   private readonly runners: StrategyRunner[] = [];
   private readonly pausedWallets = new Set<string>();
+  private readonly db = new Database();
 
   constructor(
     private readonly config: AppConfig,
@@ -30,6 +32,7 @@ export class Engine {
   }
 
   async initialize(): Promise<void> {
+    await this.db.connect();
     for (const wallet of this.config.wallets) {
       const StrategyCtor = STRATEGY_REGISTRY[wallet.strategy];
       if (!StrategyCtor) {
@@ -62,6 +65,19 @@ export class Engine {
     }
 
     this.stream.on('update', (data) => this.handleMarketUpdate(data));
+
+    // Run one-time trade history reconciliation on startup
+    for (const runner of this.runners) {
+      const wallet = this.walletManager.getWallet(runner.walletId);
+      if (wallet && typeof (wallet as any).reconcileTradeHistory === 'function') {
+        try {
+          await (wallet as any).reconcileTradeHistory();
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          logger.warn({ walletId: runner.walletId, err: msg }, 'Startup reconciliation failed');
+        }
+      }
+    }
   }
 
   start(): void {
@@ -213,10 +229,29 @@ export class Engine {
       this.marketUpdateCount = 0;
     }
 
+    // Reconcile every 6 ticks (~30 s): expired positions + trade history PnL
+    if (this.tickCount % 6 === 0) {
+      for (const runner of this.runners) {
+        const wallet = this.walletManager.getWallet(runner.walletId);
+        if (!wallet) continue;
+        try {
+          if (typeof (wallet as any).reconcileExpiredPositions === 'function') {
+            await (wallet as any).reconcileExpiredPositions();
+          }
+          if (typeof (wallet as any).reconcileTradeHistory === 'function') {
+            await (wallet as any).reconcileTradeHistory();
+          }
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          logger.error({ walletId: runner.walletId, err: msg }, 'Reconciliation error');
+        }
+      }
+    }
+
     for (const runner of this.runners) {
       if (this.pausedWallets.has(runner.walletId)) continue;  // skip paused
       try {
-        runner.strategy.onTimer();
+        await runner.strategy.onTimer();
         await this.processSignals(runner);
       } catch (err) {
         // Isolate per-runner errors so one bad strategy cannot halt all runners (H-3)
@@ -226,6 +261,25 @@ export class Engine {
           walletId: runner.walletId,
           strategy: runner.strategy.name,
         });
+      }
+    }
+
+    // Persist wallet state + trade history to disk every 6 ticks (~30s)
+    if (this.tickCount % 6 === 0) {
+      try {
+        const states = this.runners.map((r) => {
+          const w = this.walletManager.getWallet(r.walletId);
+          return w ? w.getState() : null;
+        }).filter(Boolean);
+        if (states.length > 0) {
+          await this.db.saveWallets(states as any[]);
+        }
+        const allTrades = this.walletManager.getAllTradeHistories();
+        if (allTrades.size > 0) {
+          await this.db.saveTrades(allTrades);
+        }
+      } catch (err) {
+        logger.warn({ err: err instanceof Error ? err.message : String(err) }, 'State persistence failed');
       }
     }
   }
@@ -327,6 +381,7 @@ export class Engine {
       try {
         const executed = await this.orderRouter.route(exitOrder);
         if (executed) {
+          runner.strategy.notifyFill(exitOrder);
           consoleLog.success('FILL', `[${runner.strategy.name}] Exited ${exitOrder.outcome} ×${exitOrder.size} @ $${exitOrder.price.toFixed(4)}`, {
             walletId: exitOrder.walletId,
             strategy: exitOrder.strategy,

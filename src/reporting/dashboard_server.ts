@@ -185,7 +185,7 @@ function buildWalletDetail(wallet: WalletState, trades: TradeRecord[], marketPri
       capitalAllocated: wallet.capitalAllocated,
       availableBalance: round(wallet.availableBalance),
       realizedPnl: round(wallet.realizedPnl),
-      openPositions: wallet.openPositions.map((p) => {
+      openPositions: wallet.openPositions.filter((p) => p.size > 0).map((p) => {
         const currentPrice = marketPrices?.get(p.marketId) ?? p.avgPrice;
         const uPnl = p.size > 0 && p.avgPrice > 0 ? (currentPrice - p.avgPrice) * p.size : 0;
         return {
@@ -652,6 +652,107 @@ function getStrategyCatalog(): StrategyCatalogEntry[] {
         { key: 'max_cancel_rate', label: 'Max Cancel Rate', type: 'number', default: 0.5, description: 'Max ratio of cancels to orders in a 5-min window', group: 'Risk' },
       ],
     },
+    {
+      id: 'btc15m',
+      name: 'BTC 15-Minute Predictor',
+      category: 'Technical Analysis',
+      riskLevel: 'Medium-High',
+      version: '1.0.0',
+      author: 'Built-in',
+      tags: ['bitcoin', 'btc', 'technical-analysis', 'heiken-ashi', 'rsi', 'macd', 'vwap', 'short-term'],
+      description:
+        'Trades Polymarket\'s recurring "Will BTC be UP or DOWN in the next 15 minutes?" markets using a multi-indicator technical analysis scoring system. Combines Heiken Ashi candles, RSI, MACD, and VWAP into a single directional confidence score.',
+      longDescription:
+        'This strategy is purpose-built for Polymarket\'s Bitcoin 15-minute direction markets. ' +
+        'Every cycle it fetches the latest 1-minute BTC/USDT candles and runs four indicators in parallel: ' +
+        'Heiken Ashi (trend direction and streak), RSI-14 (momentum and extremes), MACD 12/26/9 (crossovers and histogram growth), and VWAP (price relative to volume-weighted average). ' +
+        'Each indicator contributes a partial score on a −100 to +100 scale. When the combined score exceeds +40 the strategy buys YES (BTC UP); below −40 it buys NO (BTC DOWN). ' +
+        'Positions are sized at 5% of capital per trade and exited via take-profit (+150 bps), stop-loss (−100 bps), a 12-minute time exit, or an automatic close if fewer than 3 minutes remain before market expiry.',
+      howItWorks: [
+        'Fetches the latest 50 × 1-minute BTC/USDT candles each cycle',
+        'Computes Heiken Ashi candles and counts consecutive same-direction bars (up to ±30 pts)',
+        'Calculates RSI-14: scores ±25 pts, with reversal signals at overbought/oversold extremes',
+        'Runs MACD 12/26/9: crossovers contribute ±25 pts, histogram growth adds ±8–15 pts',
+        'Checks price vs VWAP: above = +20 pts bullish, below = −20 pts bearish',
+        'Sums all scores → if > +40 buy YES (UP), if < −40 buy NO (DOWN), else hold',
+        'Sizes each position at 5% of wallet capital',
+        'Exits on take-profit (+150 bps), stop-loss (−100 bps), 12-min time limit, or pre-expiry close',
+      ],
+      parameters: {
+        candleInterval: '1 minute',
+        candleLimit: '50 candles lookback',
+        rsiPeriod: '14',
+        macd: '12 / 26 / 9 (fast / slow / signal)',
+        scoreThreshold: '40 — minimum score magnitude to enter',
+        positionSizePct: '5% of wallet capital per trade',
+        minLiquidity: '$500 minimum order-book depth',
+        minTimeRemaining: '3 minutes before expiry',
+        takeProfit: '+150 bps from entry',
+        stopLoss: '−100 bps from entry',
+        timeExit: '12 minutes max hold',
+      },
+      idealFor: 'Traders who want short-term, technically-driven directional exposure on Bitcoin price markets',
+      entryLogic: [
+        'Checks that the market has at least $500 liquidity and ≥ 3 minutes until expiry',
+        'Fetches 50 × 1-min BTC/USDT candles and computes all four indicators',
+        'Sums partial scores: Heiken Ashi (±30) + RSI (±25) + MACD (±25) + VWAP (±20)',
+        'Score > +40 → BUY YES (betting BTC goes UP in next 15 min)',
+        'Score < −40 → BUY NO (betting BTC goes DOWN in next 15 min)',
+        'Confidence = |score| / 100; edge used for Kelly-style logging (not re-sizing)',
+        'Skips entry if score is between −40 and +40 (no clear signal)',
+      ],
+      exitRules: [
+        {
+          name: 'Take Profit',
+          description: 'Closes position when PnL reaches +150 bps above entry price.',
+          configKeys: ['take_profit_bps'],
+        },
+        {
+          name: 'Stop Loss',
+          description: 'Closes position when PnL drops −100 bps below entry price.',
+          configKeys: ['stop_loss_bps'],
+        },
+        {
+          name: 'Time Exit',
+          description: 'Closes position after 12 minutes regardless of PnL to prevent capital lock-up.',
+          configKeys: ['time_exit_minutes'],
+        },
+        {
+          name: 'Pre-Expiry Close',
+          description: 'Automatically exits if fewer than 3 minutes remain before market expiry, avoiding resolution risk.',
+          configKeys: ['min_time_remaining_ms'],
+        },
+      ],
+      positionSizing: [
+        'Fixed fraction: 5% of wallet capital per trade',
+        'Position size = capital × 0.05, subject to per-wallet max_position_size limit',
+        'Only one position per market at a time',
+        'Minimum $500 liquidity required before any entry',
+      ],
+      riskControls: [
+        { name: 'Stop Loss', description: 'Hard −100 bps stop on every position', configKey: 'stop_loss_bps' },
+        { name: 'Take Profit', description: '+150 bps target locks in gains before reversal', configKey: 'take_profit_bps' },
+        { name: 'Time Exit', description: '12-minute max hold prevents overnight/stale exposure', configKey: 'time_exit_minutes' },
+        { name: 'Pre-Expiry Guard', description: 'Closes all positions ≥ 3 min before market expiry', configKey: 'min_time_remaining_ms' },
+        { name: 'Liquidity Filter', description: 'Skips markets with < $500 order-book depth', configKey: 'min_liquidity' },
+        { name: 'Score Threshold', description: 'No trade unless combined indicator score exceeds ±40', configKey: 'score_threshold' },
+      ],
+      configSchema: [
+        { key: 'candle_interval', label: 'Candle Interval', type: 'string', default: '1m', description: 'Timeframe for BTC candles (e.g. 1m, 5m)', group: 'Data' },
+        { key: 'candle_limit', label: 'Candle Limit', type: 'number', default: 50, description: 'Number of historical candles to fetch per cycle', group: 'Data' },
+        { key: 'rsi_period', label: 'RSI Period', type: 'number', default: 14, description: 'Lookback period for RSI calculation', group: 'Indicators' },
+        { key: 'macd_fast', label: 'MACD Fast EMA', type: 'number', default: 12, description: 'Fast EMA period for MACD', group: 'Indicators' },
+        { key: 'macd_slow', label: 'MACD Slow EMA', type: 'number', default: 26, description: 'Slow EMA period for MACD', group: 'Indicators' },
+        { key: 'macd_signal', label: 'MACD Signal', type: 'number', default: 9, description: 'Signal line EMA period for MACD', group: 'Indicators' },
+        { key: 'score_threshold', label: 'Score Threshold', type: 'number', default: 40, description: 'Minimum absolute score to generate a signal (0–100)', group: 'Signal' },
+        { key: 'position_size_pct', label: 'Position Size %', type: 'number', default: 0.05, description: 'Fraction of capital per trade (0.05 = 5%)', group: 'Sizing' },
+        { key: 'min_liquidity', label: 'Min Liquidity', type: 'number', default: 500, unit: 'USD', description: 'Minimum market liquidity required to enter', group: 'Filters' },
+        { key: 'min_time_remaining_ms', label: 'Min Time Remaining', type: 'number', default: 180000, unit: 'ms', description: 'Skip market if less than this time remains before expiry', group: 'Filters' },
+        { key: 'take_profit_bps', label: 'Take Profit', type: 'number', default: 150, unit: 'bps', description: 'Close position at this profit level', group: 'Exit' },
+        { key: 'stop_loss_bps', label: 'Stop Loss', type: 'number', default: 100, unit: 'bps', description: 'Close position at this loss level', group: 'Exit' },
+        { key: 'time_exit_minutes', label: 'Time Exit', type: 'number', default: 12, unit: 'min', description: 'Maximum hold time before forced exit', group: 'Exit' },
+      ],
+    },
   ];
 }
 
@@ -1043,6 +1144,281 @@ export class DashboardServer {
     /* ─── JSON: strategy catalog ─── */
     if (path === '/api/strategies' && method === 'GET') {
       json(res, 200, getStrategyCatalog());
+      return;
+    }
+
+    /* ─── JSON: scaling roadmap ─── */
+    if (path === '/api/scaling' && method === 'GET') {
+      const wallets = this.walletManager ? this.walletManager.listWallets() : [];
+      const totalCapital = wallets.reduce((s, w) => s + w.capitalAllocated, 0);
+      const totalPnl = wallets.reduce((s, w) => s + w.realizedPnl, 0);
+      const activeStrategies = [...new Set(wallets.map((w) => w.assignedStrategy))];
+
+      const tiers = [
+        {
+          name: 'Starter',
+          range: '$20 \u2013 $50',
+          minCapital: 20,
+          maxCapital: 50,
+          focus: 'Learn the system, validate signals, build confidence with minimal risk.',
+          wallets: [
+            { name: 'btc15m-paper', strategy: 'btc15m', mode: 'PAPER', capital: 20, purpose: 'Test BTC 15-min signals without risking real money. Run for at least 2\u20133 days to see win rate.' },
+            { name: 'btc15m-live', strategy: 'btc15m', mode: 'LIVE', capital: 20, purpose: 'Go live with minimum capital once paper trading shows >52% win rate. FOK orders for instant fills.' },
+          ],
+          riskLimits: { maxPositionSize: 10, maxExposurePerMarket: 15, maxDailyLoss: 5, maxOpenTrades: 3 },
+          tips: [
+            'Keep btc15m as your only live strategy \u2014 learn one strategy deeply before diversifying',
+            'Track your win rate on the Analytics tab \u2014 aim for >55% before scaling up',
+            'Don\u2019t increase capital until you have 50+ trades of history',
+          ],
+        },
+        {
+          name: 'Growth',
+          range: '$50 \u2013 $200',
+          minCapital: 50,
+          maxCapital: 200,
+          focus: 'Increase BTC position sizes and add a second uncorrelated strategy for diversification.',
+          wallets: [
+            { name: 'btc15m-main', strategy: 'btc15m', mode: 'LIVE', capital: 50, purpose: 'Primary earner. Increased capital allows 5\u201310 share positions for better fills.' },
+            { name: 'convergence-1', strategy: 'filtered_high_prob_convergence', mode: 'LIVE', capital: 50, purpose: 'Uncorrelated to BTC \u2014 trades high-probability event markets. Slower but steadier returns.' },
+            { name: 'btc15m-paper-aggressive', strategy: 'btc15m', mode: 'PAPER', capital: 50, purpose: 'Paper test with lower threshold (scoreThreshold: 30) to see if more trades = more profit.' },
+          ],
+          riskLimits: { maxPositionSize: 20, maxExposurePerMarket: 40, maxDailyLoss: 15, maxOpenTrades: 5 },
+          tips: [
+            'Two uncorrelated strategies smooth your equity curve \u2014 BTC direction + event convergence',
+            'Never put more than 50% of total capital into one strategy',
+            'Consider running a paper wallet with aggressive settings to A/B test parameters',
+          ],
+        },
+        {
+          name: 'Intermediate',
+          range: '$200 \u2013 $500',
+          minCapital: 200,
+          maxCapital: 500,
+          focus: 'Add market-neutral strategies and whale tracking to capture different types of edge.',
+          wallets: [
+            { name: 'btc15m-core', strategy: 'btc15m', mode: 'LIVE', capital: 80, purpose: 'Core BTC strategy with proven edge. 16% of capital.' },
+            { name: 'convergence-main', strategy: 'filtered_high_prob_convergence', mode: 'LIVE', capital: 120, purpose: 'Convergence strategy works well with more capital \u2014 can enter more markets simultaneously.' },
+            { name: 'arb-1', strategy: 'mispricing_arbitrage', mode: 'LIVE', capital: 100, purpose: 'Market-neutral: profits from pricing errors regardless of direction. Very low risk.' },
+            { name: 'copy-whale', strategy: 'copy_trade', mode: 'PAPER', capital: 100, purpose: 'Paper test whale copying first. Track which whales are profitable before going live.' },
+            { name: 'momentum-1', strategy: 'momentum', mode: 'LIVE', capital: 100, purpose: 'Captures big moves in trending event markets. Higher risk, higher reward.' },
+          ],
+          riskLimits: { maxPositionSize: 30, maxExposurePerMarket: 60, maxDailyLoss: 30, maxOpenTrades: 10 },
+          tips: [
+            'Enable whale tracking (set whale_tracking.enabled: true in config.yaml) to discover profitable wallets',
+            'Arbitrage strategies are your safety net \u2014 they profit in any market condition',
+            'Keep a paper wallet for each new strategy for at least 100 trades before going live',
+            'Review Analytics weekly and cut underperforming strategies',
+          ],
+        },
+        {
+          name: 'Advanced',
+          range: '$500 \u2013 $2,000',
+          minCapital: 500,
+          maxCapital: 2000,
+          focus: 'Full portfolio approach with 5\u20137 active strategies, whale copy trading, and cross-market arbitrage.',
+          wallets: [
+            { name: 'btc15m-alpha', strategy: 'btc15m', mode: 'LIVE', capital: 150, purpose: 'BTC 15-min with optimized parameters from months of data.' },
+            { name: 'convergence-lg', strategy: 'filtered_high_prob_convergence', mode: 'LIVE', capital: 300, purpose: 'Largest allocation \u2014 this strategy scales best with more capital.' },
+            { name: 'arb-cross', strategy: 'cross_market_arbitrage', mode: 'LIVE', capital: 200, purpose: 'Cross-market arbitrage finds mispriced correlated markets. Needs capital for two-leg trades.' },
+            { name: 'arb-mispricing', strategy: 'mispricing_arbitrage', mode: 'LIVE', capital: 200, purpose: 'Complementary to cross-market arb. Different type of pricing error.' },
+            { name: 'copy-whale-live', strategy: 'copy_trade', mode: 'LIVE', capital: 200, purpose: 'Go live with whale copying after shadow portfolio validates top whales.' },
+            { name: 'momentum-trend', strategy: 'momentum', mode: 'LIVE', capital: 150, purpose: 'Catch breakouts in high-volume event markets.' },
+            { name: 'ai-research', strategy: 'ai_forecast', mode: 'PAPER', capital: 200, purpose: 'Paper test the multi-factor ensemble strategy. Complex but high alpha potential.' },
+          ],
+          riskLimits: { maxPositionSize: 50, maxExposurePerMarket: 100, maxDailyLoss: 60, maxOpenTrades: 20 },
+          tips: [
+            'At this level, correlation between strategies matters \u2014 diversify across strategy types',
+            'Use the whale network graph to find clusters of coordinated whale activity',
+            'Consider running on a VPS/cloud server for 24/7 uptime (use Docker)',
+            'Set up Telegram alerts for large trades and drawdown warnings',
+            'Rebalance capital monthly based on strategy performance',
+          ],
+        },
+        {
+          name: 'Professional',
+          range: '$2,000+',
+          minCapital: 2000,
+          maxCapital: 999999,
+          focus: 'Maximum diversification, custom strategies, market making, and multi-exchange scanning.',
+          wallets: [
+            { name: 'btc15m-pro', strategy: 'btc15m', mode: 'LIVE', capital: 300, purpose: 'Proven BTC edge with tight risk controls.' },
+            { name: 'convergence-pro', strategy: 'filtered_high_prob_convergence', mode: 'LIVE', capital: 500, purpose: 'Core allocation to the most scalable strategy.' },
+            { name: 'arb-suite-1', strategy: 'cross_market_arbitrage', mode: 'LIVE', capital: 400, purpose: 'Cross-market arbitrage leg 1.' },
+            { name: 'arb-suite-2', strategy: 'mispricing_arbitrage', mode: 'LIVE', capital: 400, purpose: 'Mispricing detection leg 2.' },
+            { name: 'mm-1', strategy: 'market_making', mode: 'LIVE', capital: 300, purpose: 'Provide liquidity and earn spread. Needs capital to keep both sides quoted.' },
+            { name: 'copy-whale-pro', strategy: 'copy_trade', mode: 'LIVE', capital: 300, purpose: 'Copy top-performing whales with proportional sizing.' },
+            { name: 'momentum-pro', strategy: 'momentum', mode: 'LIVE', capital: 200, purpose: 'Catch large market moves.' },
+            { name: 'ai-live', strategy: 'ai_forecast', mode: 'LIVE', capital: 300, purpose: 'Multi-factor ensemble with full capital.' },
+            { name: 'custom-1', strategy: 'user_defined', mode: 'PAPER', capital: 200, purpose: 'Develop and test your own custom strategy logic.' },
+          ],
+          riskLimits: { maxPositionSize: 100, maxExposurePerMarket: 200, maxDailyLoss: 150, maxOpenTrades: 30 },
+          tips: [
+            'At this scale, you ARE the market \u2014 be aware of your own impact on prices',
+            'Market making becomes viable and provides consistent income from spreads',
+            'Build custom strategies for specific market niches you understand well',
+            'Consider enabling Kalshi/Manifold scanning for cross-exchange opportunities',
+            'Implement automated rebalancing between strategy wallets',
+            'Run redundant instances across multiple servers for fault tolerance',
+          ],
+        },
+      ];
+
+      json(res, 200, {
+        currentCapital: totalCapital,
+        totalPnl,
+        activeStrategies,
+        walletCount: wallets.length,
+        tiers,
+      });
+      return;
+    }
+
+    /* ─── JSON: create all wallets for a scaling tier ─── */
+    if (path === '/api/scaling/create-tier' && method === 'POST') {
+      const body = await readBody(req);
+      const tierName = String(body.tierName ?? '').trim();
+
+      if (!tierName) {
+        json(res, 400, { ok: false, error: 'tierName is required' });
+        return;
+      }
+
+      // Re-derive tiers (same as GET /api/scaling)
+      const tierDefs: Record<string, { wallets: Array<{ name: string; strategy: string; mode: string; capital: number }>; riskLimits: { maxPositionSize: number; maxExposurePerMarket: number; maxDailyLoss: number; maxOpenTrades: number; maxDrawdown?: number } }> = {
+        Starter: {
+          wallets: [
+            { name: 'btc15m-paper', strategy: 'btc15m', mode: 'PAPER', capital: 20 },
+            { name: 'btc15m-live', strategy: 'btc15m', mode: 'LIVE', capital: 20 },
+          ],
+          riskLimits: { maxPositionSize: 10, maxExposurePerMarket: 15, maxDailyLoss: 5, maxOpenTrades: 3, maxDrawdown: 0.25 },
+        },
+        Growth: {
+          wallets: [
+            { name: 'btc15m-main', strategy: 'btc15m', mode: 'LIVE', capital: 50 },
+            { name: 'convergence-1', strategy: 'filtered_high_prob_convergence', mode: 'LIVE', capital: 50 },
+            { name: 'btc15m-paper-aggressive', strategy: 'btc15m', mode: 'PAPER', capital: 50 },
+          ],
+          riskLimits: { maxPositionSize: 20, maxExposurePerMarket: 40, maxDailyLoss: 15, maxOpenTrades: 5, maxDrawdown: 0.25 },
+        },
+        Intermediate: {
+          wallets: [
+            { name: 'btc15m-core', strategy: 'btc15m', mode: 'LIVE', capital: 80 },
+            { name: 'convergence-main', strategy: 'filtered_high_prob_convergence', mode: 'LIVE', capital: 120 },
+            { name: 'arb-1', strategy: 'mispricing_arbitrage', mode: 'LIVE', capital: 100 },
+            { name: 'copy-whale', strategy: 'copy_trade', mode: 'PAPER', capital: 100 },
+            { name: 'momentum-1', strategy: 'momentum', mode: 'LIVE', capital: 100 },
+          ],
+          riskLimits: { maxPositionSize: 30, maxExposurePerMarket: 60, maxDailyLoss: 30, maxOpenTrades: 10, maxDrawdown: 0.25 },
+        },
+        Advanced: {
+          wallets: [
+            { name: 'btc15m-alpha', strategy: 'btc15m', mode: 'LIVE', capital: 150 },
+            { name: 'convergence-lg', strategy: 'filtered_high_prob_convergence', mode: 'LIVE', capital: 300 },
+            { name: 'arb-cross', strategy: 'cross_market_arbitrage', mode: 'LIVE', capital: 200 },
+            { name: 'arb-mispricing', strategy: 'mispricing_arbitrage', mode: 'LIVE', capital: 200 },
+            { name: 'copy-whale-live', strategy: 'copy_trade', mode: 'LIVE', capital: 200 },
+            { name: 'momentum-trend', strategy: 'momentum', mode: 'LIVE', capital: 150 },
+            { name: 'ai-research', strategy: 'ai_forecast', mode: 'PAPER', capital: 200 },
+          ],
+          riskLimits: { maxPositionSize: 50, maxExposurePerMarket: 100, maxDailyLoss: 60, maxOpenTrades: 20, maxDrawdown: 0.20 },
+        },
+        Professional: {
+          wallets: [
+            { name: 'btc15m-pro', strategy: 'btc15m', mode: 'LIVE', capital: 300 },
+            { name: 'convergence-pro', strategy: 'filtered_high_prob_convergence', mode: 'LIVE', capital: 500 },
+            { name: 'arb-suite-1', strategy: 'cross_market_arbitrage', mode: 'LIVE', capital: 400 },
+            { name: 'arb-suite-2', strategy: 'mispricing_arbitrage', mode: 'LIVE', capital: 400 },
+            { name: 'mm-1', strategy: 'market_making', mode: 'LIVE', capital: 300 },
+            { name: 'copy-whale-pro', strategy: 'copy_trade', mode: 'LIVE', capital: 300 },
+            { name: 'momentum-pro', strategy: 'momentum', mode: 'LIVE', capital: 200 },
+            { name: 'ai-live', strategy: 'ai_forecast', mode: 'LIVE', capital: 300 },
+          ],
+          riskLimits: { maxPositionSize: 100, maxExposurePerMarket: 200, maxDailyLoss: 150, maxOpenTrades: 30, maxDrawdown: 0.20 },
+        },
+      };
+
+      const tier = tierDefs[tierName];
+      if (!tier) {
+        json(res, 400, { ok: false, error: `Unknown tier: ${tierName}` });
+        return;
+      }
+
+      const existingIds = new Set(this.walletManager.listWallets().map((w) => w.walletId));
+      const knownStrategies = listStrategies();
+      const created: string[] = [];
+      const skipped: string[] = [];
+      const errors: string[] = [];
+
+      for (const w of tier.wallets) {
+        if (existingIds.has(w.name)) {
+          skipped.push(w.name);
+          continue;
+        }
+        if (!knownStrategies.includes(w.strategy)) {
+          skipped.push(`${w.name} (unknown strategy: ${w.strategy})`);
+          continue;
+        }
+        if (w.mode === 'LIVE' && process.env.ENABLE_LIVE_TRADING !== 'true') {
+          skipped.push(`${w.name} (LIVE trading disabled)`);
+          continue;
+        }
+        try {
+          const walletConfig = {
+            id: w.name,
+            mode: w.mode as 'LIVE' | 'PAPER',
+            strategy: w.strategy,
+            capital: w.capital,
+            riskLimits: {
+              maxPositionSize: tier.riskLimits.maxPositionSize,
+              maxExposurePerMarket: tier.riskLimits.maxExposurePerMarket,
+              maxDailyLoss: tier.riskLimits.maxDailyLoss,
+              maxOpenTrades: tier.riskLimits.maxOpenTrades,
+              maxDrawdown: tier.riskLimits.maxDrawdown ?? 0.25,
+            },
+          };
+          const wallet = w.mode === 'LIVE'
+            ? new PolymarketWallet(walletConfig, w.strategy)
+            : new PaperWallet(walletConfig, w.strategy);
+          this.walletManager.addWallet(wallet);
+          if (this.engine) {
+            this.engine.addRunner(w.name, w.strategy);
+          }
+          created.push(w.name);
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          errors.push(`${w.name}: ${msg}`);
+        }
+      }
+
+      json(res, 200, {
+        ok: true,
+        tierName,
+        created,
+        skipped,
+        errors,
+        message: `Created ${created.length} wallet(s), skipped ${skipped.length}, errors ${errors.length}`,
+      });
+      return;
+    }
+
+    /* ─── JSON: btc15m live state ─── */
+    if (path === '/api/btc15m/live' && method === 'GET') {
+      if (!this.engine) {
+        json(res, 503, { error: 'Engine not started' });
+        return;
+      }
+      const strategies = this.engine.getStrategiesByName('btc15m');
+      if (strategies.length === 0) {
+        json(res, 404, { error: 'btc15m strategy not running' });
+        return;
+      }
+      const strat = strategies[0] as any;
+      if (typeof strat.getLiveState === 'function') {
+        json(res, 200, strat.getLiveState());
+      } else {
+        json(res, 404, { error: 'getLiveState not available' });
+      }
       return;
     }
 
@@ -1751,8 +2127,10 @@ footer{text-align:center;padding:24px;color:var(--muted);font-size:11px;border-t
     <button class="tab-btn active" data-tab="dashboard">Dashboard</button>
     <button class="tab-btn" data-tab="markets">Markets</button>
     <button class="tab-btn" data-tab="wallets">Wallets</button>
+    <button class="tab-btn" data-tab="btc15m-live">BTC Live</button>
     <button class="tab-btn" data-tab="strategies">Strategies</button>
     <button class="tab-btn" data-tab="analytics">Analytics</button>
+    <button class="tab-btn" data-tab="scaling">Scaling</button>
     <button class="tab-btn" data-tab="whales">🐋 Whales</button>
     <button class="tab-btn" data-tab="console">📟 Console</button>
   </div>
@@ -1802,6 +2180,14 @@ footer{text-align:center;padding:24px;color:var(--muted);font-size:11px;border-t
       </tr></thead>
       <tbody id="wt-body"></tbody>
     </table>
+  </div>
+</div>
+
+<!-- ═════════════ BTC LIVE TAB ═════════════ -->
+<div class="tab-pane" id="pane-btc15m-live">
+  <div class="section-title"><span class="icon">&#x20BF;</span> BTC 15-Min Live Tracker</div>
+  <div id="btc15m-live-content" style="padding:16px">
+    <p style="color:#888">Loading...</p>
   </div>
 </div>
 
@@ -1928,6 +2314,14 @@ footer{text-align:center;padding:24px;color:var(--muted);font-size:11px;border-t
 </div>
 
 <!-- ═════════════ TAB 4: ANALYTICS ═════════════ -->
+<!-- ═════════════ SCALING TAB ═════════════ -->
+<div class="tab-pane" id="pane-scaling">
+  <div class="section-title"><span class="icon">&#x1F4C8;</span> Scaling Roadmap</div>
+  <div id="scaling-content" style="padding:16px">
+    <p style="color:#888">Loading...</p>
+  </div>
+</div>
+
 <div class="tab-pane" id="pane-analytics">
   <div class="section-title"><span class="icon">\uD83D\uDCCA</span> Trading Analytics</div>
 
@@ -4568,6 +4962,308 @@ async function refresh(){
     if(!sseConnected) await fetchDashboardData();
   }catch(e){$('#hdr-ts').textContent='Error \u2014 retrying\u2026'}
 }
+
+/* ─── Scaling Roadmap ─── */
+async function renderScaling(){
+  const el=$('#scaling-content');
+  if(!el) return;
+  try{
+    const r=await fetch('/api/scaling');
+    if(!r.ok){el.innerHTML='<p style="color:#f66">Failed to load</p>';return;}
+    const d=await r.json();
+    let html='';
+
+    /* Current status banner */
+    html+='<div class="card" style="padding:20px;margin-bottom:24px;border-left:4px solid #4fc3f7">';
+    html+='<h3 style="color:#4fc3f7;margin:0 0 12px">Your Current Status</h3>';
+    html+='<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:16px">';
+    html+='<div><div style="color:#888;font-size:12px">Total Capital</div><div style="color:#4caf50;font-size:24px;font-weight:bold">$'+d.currentCapital.toFixed(2)+'</div></div>';
+    html+='<div><div style="color:#888;font-size:12px">Total PnL</div><div style="color:'+(d.totalPnl>=0?'#4caf50':'#f44336')+';font-size:24px;font-weight:bold">'+(d.totalPnl>=0?'+':'')+d.totalPnl.toFixed(2)+'</div></div>';
+    html+='<div><div style="color:#888;font-size:12px">Active Wallets</div><div style="color:#e0e0e0;font-size:24px;font-weight:bold">'+d.walletCount+'</div></div>';
+    html+='<div><div style="color:#888;font-size:12px">Active Strategies</div><div style="color:#e0e0e0;font-size:24px;font-weight:bold">'+d.activeStrategies.length+'</div></div>';
+    html+='</div></div>';
+
+    /* Tier progression */
+    for(const tier of d.tiers){
+      const isCurrent=d.currentCapital>=tier.minCapital&&d.currentCapital<tier.maxCapital;
+      const isUnlocked=true;
+      const borderCol=isCurrent?'#4fc3f7':isUnlocked?'#4caf50':'#444';
+      const opacity=isUnlocked?1:0.5;
+
+      html+='<div class="card" style="padding:20px;margin-bottom:20px;border-left:4px solid '+borderCol+';opacity:'+opacity+'">';
+
+      /* Header */
+      html+='<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">';
+      html+='<div>';
+      html+='<h3 style="color:'+borderCol+';margin:0">'+tier.name+(isCurrent?' \\u2190 YOU ARE HERE':'')+'</h3>';
+      html+='<div style="color:#888;font-size:13px">Capital: '+tier.range+'</div>';
+      html+='</div>';
+      if(!isUnlocked){
+        const needed=tier.minCapital-d.currentCapital;
+        html+='<div style="background:#333;padding:6px 12px;border-radius:12px;font-size:12px;color:#f9a825">Need $'+needed.toFixed(0)+' more to unlock</div>';
+      } else if(isCurrent){
+        html+='<div style="background:#1a3a4a;padding:6px 12px;border-radius:12px;font-size:12px;color:#4fc3f7">Current Tier</div>';
+      } else {
+        html+='<div style="background:#1a3a1a;padding:6px 12px;border-radius:12px;font-size:12px;color:#4caf50">Unlocked</div>';
+      }
+      html+='</div>';
+
+      /* Focus */
+      html+='<div style="color:#e0e0e0;font-size:14px;margin-bottom:16px">'+tier.focus+'</div>';
+
+      /* Recommended wallets table */
+      html+='<h4 style="color:#aaa;margin:0 0 8px;font-size:13px;text-transform:uppercase;letter-spacing:1px">Recommended Wallets</h4>';
+      html+='<table style="width:100%;font-size:13px;border-collapse:collapse;margin-bottom:16px">';
+      html+='<tr style="color:#888;border-bottom:1px solid #333"><th style="text-align:left;padding:6px 8px">Wallet</th><th style="text-align:left;padding:6px 8px">Strategy</th><th style="text-align:center;padding:6px 8px">Mode</th><th style="text-align:right;padding:6px 8px">Capital</th><th style="text-align:left;padding:6px 8px">Purpose</th></tr>';
+      for(const w of tier.wallets){
+        const modeCol=w.mode==='LIVE'?'#4caf50':'#f9a825';
+        html+='<tr style="border-bottom:1px solid #222">';
+        html+='<td style="padding:6px 8px;color:#e0e0e0;font-weight:bold">'+w.name+'</td>';
+        html+='<td style="padding:6px 8px;color:#4fc3f7">'+w.strategy+'</td>';
+        html+='<td style="padding:6px 8px;text-align:center"><span style="background:'+(w.mode==='LIVE'?'#1a3a1a':'#3a3a1a')+';color:'+modeCol+';padding:2px 8px;border-radius:8px;font-size:11px">'+w.mode+'</span></td>';
+        html+='<td style="padding:6px 8px;text-align:right;color:#4caf50;font-weight:bold">$'+w.capital+'</td>';
+        html+='<td style="padding:6px 8px;color:#999;font-size:12px">'+w.purpose+'</td>';
+        html+='</tr>';
+      }
+      html+='</table>';
+
+      /* Create All Wallets button */
+      const btnId='scaling-create-'+tier.name.toLowerCase().replace(/[^a-z0-9]/g,'');
+      const totalCap=tier.wallets.reduce((s,w)=>s+w.capital,0);
+      html+='<div style="display:flex;align-items:center;gap:12px;margin-bottom:16px">';
+      html+='<button id="'+btnId+'" data-tier="'+tier.name+'" class="scaling-create-btn" style="background:linear-gradient(135deg,#4fc3f7,#0288d1);color:#fff;border:none;padding:10px 24px;border-radius:8px;font-size:14px;font-weight:bold;cursor:pointer;transition:all 0.2s">Create All Wallets ($'+totalCap+' total)</button>';
+      html+='<span id="'+btnId+'-status" style="font-size:13px;color:#888"></span>';
+      html+='</div>';
+
+      /* Risk limits */
+      html+='<h4 style="color:#aaa;margin:0 0 8px;font-size:13px;text-transform:uppercase;letter-spacing:1px">Risk Limits</h4>';
+      html+='<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:16px">';
+      html+='<div style="background:#1a1a2e;padding:8px;border-radius:6px;text-align:center"><div style="color:#888;font-size:11px">Max Position</div><div style="color:#e0e0e0;font-size:16px;font-weight:bold">'+tier.riskLimits.maxPositionSize+'</div></div>';
+      html+='<div style="background:#1a1a2e;padding:8px;border-radius:6px;text-align:center"><div style="color:#888;font-size:11px">Max Exposure/Mkt</div><div style="color:#e0e0e0;font-size:16px;font-weight:bold">$'+tier.riskLimits.maxExposurePerMarket+'</div></div>';
+      html+='<div style="background:#1a1a2e;padding:8px;border-radius:6px;text-align:center"><div style="color:#888;font-size:11px">Max Daily Loss</div><div style="color:#f44336;font-size:16px;font-weight:bold">$'+tier.riskLimits.maxDailyLoss+'</div></div>';
+      html+='<div style="background:#1a1a2e;padding:8px;border-radius:6px;text-align:center"><div style="color:#888;font-size:11px">Max Open Trades</div><div style="color:#e0e0e0;font-size:16px;font-weight:bold">'+tier.riskLimits.maxOpenTrades+'</div></div>';
+      html+='</div>';
+
+      /* Tips */
+      html+='<h4 style="color:#aaa;margin:0 0 8px;font-size:13px;text-transform:uppercase;letter-spacing:1px">Tips</h4>';
+      html+='<ul style="margin:0;padding-left:20px;color:#ccc;font-size:13px;line-height:1.8">';
+      for(const tip of tier.tips){
+        html+='<li>'+tip+'</li>';
+      }
+      html+='</ul>';
+
+      html+='</div>';
+    }
+
+    /* Capital allocation chart for current tier */
+    const currentTier=d.tiers.find(t=>d.currentCapital>=t.minCapital&&d.currentCapital<t.maxCapital)||d.tiers[0];
+    const totalAlloc=currentTier.wallets.reduce((s,w)=>s+w.capital,0);
+    html+='<div class="card" style="padding:20px;margin-bottom:20px">';
+    html+='<h3 style="color:#4fc3f7;margin:0 0 16px">Recommended Capital Allocation ('+currentTier.name+' Tier)</h3>';
+    const colors=['#4fc3f7','#4caf50','#f9a825','#f44336','#9c27b0','#ff9800','#00bcd4','#e91e63','#8bc34a'];
+    html+='<div style="display:flex;height:32px;border-radius:8px;overflow:hidden;margin-bottom:12px">';
+    currentTier.wallets.forEach((w,i)=>{
+      const pct=(w.capital/totalAlloc*100);
+      html+='<div style="width:'+pct+'%;background:'+colors[i%colors.length]+';display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:bold;color:#000" title="'+w.name+': $'+w.capital+' ('+pct.toFixed(0)+'%)">'+(pct>8?w.strategy:'')+'</div>';
+    });
+    html+='</div>';
+    html+='<div style="display:flex;flex-wrap:wrap;gap:12px">';
+    currentTier.wallets.forEach((w,i)=>{
+      html+='<div style="display:flex;align-items:center;gap:6px;font-size:12px"><span style="width:12px;height:12px;border-radius:2px;background:'+colors[i%colors.length]+';display:inline-block"></span><span style="color:#ccc">'+w.name+' ($'+w.capital+')</span></div>';
+    });
+    html+='</div>';
+    html+='</div>';
+
+    el.innerHTML=html;
+    /* Attach click handlers to Create buttons */
+    el.querySelectorAll('.scaling-create-btn').forEach(function(btn){
+      btn.addEventListener('click',function(){ createTierWallets(btn.getAttribute('data-tier')); });
+    });
+  }catch(e){el.innerHTML='<p style="color:#f66">Error: '+e.message+'</p>';}
+}
+
+/* ─── Create Tier Wallets ─── */
+async function createTierWallets(tierName){
+  const btnId='scaling-create-'+tierName.toLowerCase().replace(/[^a-z0-9]/g,'');
+  const btn=document.getElementById(btnId);
+  const status=document.getElementById(btnId+'-status');
+  if(!btn) return;
+
+  if(!confirm('Create all '+tierName+' tier wallets? This will set up the recommended wallets and connect them to the engine.')){
+    return;
+  }
+
+  btn.disabled=true;
+  btn.style.opacity='0.6';
+  btn.textContent='Creating...';
+  if(status) status.textContent='';
+
+  try{
+    const r=await fetch('/api/scaling/create-tier',{
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({tierName})
+    });
+    const d=await r.json();
+    if(d.ok){
+      let msg='';
+      if(d.created.length>0) msg+='Created: '+d.created.join(', ')+'. ';
+      if(d.skipped.length>0) msg+='Skipped (already exist): '+d.skipped.join(', ')+'. ';
+      if(d.errors.length>0) msg+='Errors: '+d.errors.join('; ')+'. ';
+      if(status){
+        status.style.color=d.errors.length>0?'#f9a825':'#4caf50';
+        status.textContent=msg||d.message;
+      }
+      btn.textContent='Done!';
+      btn.style.background='linear-gradient(135deg,#4caf50,#2e7d32)';
+      // Re-render after short delay so status is visible
+      setTimeout(()=>{ renderScaling(); },2500);
+    } else {
+      if(status){ status.style.color='#f44336'; status.textContent=d.error||'Failed'; }
+      btn.textContent='Failed — Retry';
+      btn.disabled=false;
+      btn.style.opacity='1';
+    }
+  }catch(e){
+    if(status){ status.style.color='#f44336'; status.textContent='Network error: '+e.message; }
+    btn.textContent='Error — Retry';
+    btn.disabled=false;
+    btn.style.opacity='1';
+  }
+}
+
+/* Render scaling when tab is clicked */
+document.querySelectorAll('.tab-btn').forEach(btn=>{
+  btn.addEventListener('click',()=>{
+    if(btn.dataset.tab==='scaling') renderScaling();
+  });
+});
+
+/* ─── BTC 15m Live Tracker ─── */
+let btc15mInterval=null;
+function startBtc15mPolling(){
+  if(btc15mInterval) return;
+  renderBtc15mLive();
+  btc15mInterval=setInterval(renderBtc15mLive, 3000);
+}
+function stopBtc15mPolling(){
+  if(btc15mInterval){clearInterval(btc15mInterval);btc15mInterval=null;}
+}
+async function renderBtc15mLive(){
+  const el=$('#btc15m-live-content');
+  if(!el) return;
+  try{
+    const r=await fetch('/api/btc15m/live');
+    if(!r.ok){el.innerHTML='<p style="color:#f66">Strategy not running</p>';return;}
+    const s=await r.json();
+    let html='';
+    /* Market info */
+    html+='<div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:20px">';
+    html+='<div class="card" style="padding:16px">';
+    html+='<h3 style="color:#4fc3f7;margin:0 0 12px">Active Market</h3>';
+    if(s.activeMarket){
+      const end=s.activeMarket.endDate?new Date(s.activeMarket.endDate):null;
+      const remainMin=end?((end-Date.now())/60000).toFixed(1):'?';
+      const remainColor=end&&(end-Date.now()<180000)?'#f66':'#4caf50';
+      html+='<div style="font-size:14px;color:#e0e0e0;margin-bottom:8px">'+s.activeMarket.question+'</div>';
+      html+='<div style="font-size:12px;color:#888">Slug: '+s.activeMarket.slug+'</div>';
+      html+='<div style="font-size:12px;color:#888">Market ID: '+s.activeMarket.marketId+'</div>';
+      html+='<div style="font-size:12px;color:#888">Liquidity: $'+(s.activeMarket.liquidity||0).toFixed(0)+'</div>';
+      html+='<div style="font-size:14px;margin-top:8px">Time remaining: <span style="color:'+remainColor+';font-weight:bold">'+remainMin+' min</span></div>';
+    } else {
+      html+='<div style="color:#f9a825;font-size:14px">No active BTC 15-minute market found</div>';
+      html+='<div style="color:#888;font-size:12px;margin-top:4px">Scanning '+s.candles+' candles loaded, waiting for market...</div>';
+    }
+    html+='</div>';
+    /* Decision */
+    html+='<div class="card" style="padding:16px">';
+    html+='<h3 style="color:#4fc3f7;margin:0 0 12px">Decision</h3>';
+    const decColor=s.decision.includes('YES')?'#4caf50':s.decision.includes('NO')?'#f44336':'#f9a825';
+    html+='<div style="font-size:28px;font-weight:bold;color:'+decColor+';margin:12px 0">'+s.decision+'</div>';
+    html+='<div style="font-size:12px;color:#888">Threshold: \\u00b1'+s.threshold+' | Candles: '+s.candles+'</div>';
+    html+='<div style="font-size:12px;color:#888">Last candle fetch: '+(s.lastCandleFetch?new Date(s.lastCandleFetch).toLocaleTimeString():'never')+'</div>';
+    html+='</div></div>';
+    /* Score breakdown */
+    html+='<div class="card" style="padding:16px;margin-bottom:20px">';
+    html+='<h3 style="color:#4fc3f7;margin:0 0 16px">Score Breakdown</h3>';
+    if(s.scores){
+      const bars=[
+        {name:'Heiken Ashi',val:s.scores.ha,max:30,desc:'Trend direction (consecutive candles)'},
+        {name:'RSI (14)',val:s.scores.rsi,max:25,desc:'Momentum / overbought / oversold'},
+        {name:'MACD (12/26/9)',val:s.scores.macd,max:25,desc:'Histogram direction & crossover'},
+        {name:'VWAP',val:s.scores.vwap,max:20,desc:'Price vs volume-weighted avg'},
+      ];
+      html+='<div style="display:grid;gap:12px">';
+      for(const b of bars){
+        const pct=Math.abs(b.val)/b.max*100;
+        const col=b.val>0?'#4caf50':b.val<0?'#f44336':'#555';
+        const dir=b.val>0?'Bullish':b.val<0?'Bearish':'Neutral';
+        html+='<div>';
+        html+='<div style="display:flex;justify-content:space-between;margin-bottom:4px">';
+        html+='<span style="color:#e0e0e0;font-size:13px">'+b.name+'</span>';
+        html+='<span style="color:'+col+';font-weight:bold;font-size:13px">'+(b.val>0?'+':'')+b.val+' / \\u00b1'+b.max+' ('+dir+')</span>';
+        html+='</div>';
+        html+='<div style="background:#333;border-radius:4px;height:8px;position:relative;overflow:hidden">';
+        html+='<div style="position:absolute;left:50%;width:1px;height:100%;background:#666"></div>';
+        if(b.val>0){
+          html+='<div style="position:absolute;left:50%;width:'+pct/2+'%;height:100%;background:'+col+';border-radius:0 4px 4px 0"></div>';
+        }else if(b.val<0){
+          html+='<div style="position:absolute;right:50%;width:'+pct/2+'%;height:100%;background:'+col+';border-radius:4px 0 0 4px"></div>';
+        }
+        html+='</div>';
+        html+='<div style="font-size:11px;color:#666;margin-top:2px">'+b.desc+'</div>';
+        html+='</div>';
+      }
+      html+='</div>';
+      /* Total score bar */
+      const totalPct=Math.min(Math.abs(s.scores.total)/100*100,100);
+      const totalCol=s.scores.total>0?'#4caf50':s.scores.total<0?'#f44336':'#555';
+      const aboveThreshold=Math.abs(s.scores.total)>=s.threshold;
+      html+='<div style="margin-top:16px;padding-top:16px;border-top:1px solid #333">';
+      html+='<div style="display:flex;justify-content:space-between;margin-bottom:6px">';
+      html+='<span style="color:#fff;font-size:15px;font-weight:bold">TOTAL SCORE</span>';
+      html+='<span style="color:'+totalCol+';font-weight:bold;font-size:18px">'+(s.scores.total>0?'+':'')+s.scores.total+' / \\u00b1100</span>';
+      html+='</div>';
+      html+='<div style="background:#333;border-radius:4px;height:12px;position:relative;overflow:hidden">';
+      html+='<div style="position:absolute;left:50%;width:1px;height:100%;background:#666;z-index:2"></div>';
+      /* Threshold markers */
+      const thPct=s.threshold/100*50;
+      html+='<div style="position:absolute;left:'+(50+thPct)+'%;width:2px;height:100%;background:#f9a825;z-index:2" title="Threshold +'+s.threshold+'"></div>';
+      html+='<div style="position:absolute;left:'+(50-thPct)+'%;width:2px;height:100%;background:#f9a825;z-index:2" title="Threshold -'+s.threshold+'"></div>';
+      if(s.scores.total>0){
+        html+='<div style="position:absolute;left:50%;width:'+totalPct/2+'%;height:100%;background:'+totalCol+';border-radius:0 4px 4px 0"></div>';
+      }else if(s.scores.total<0){
+        html+='<div style="position:absolute;right:50%;width:'+totalPct/2+'%;height:100%;background:'+totalCol+';border-radius:4px 0 0 4px"></div>';
+      }
+      html+='</div>';
+      html+='<div style="font-size:11px;color:'+(aboveThreshold?'#4caf50':'#f9a825')+';margin-top:4px">'+(aboveThreshold?'Score exceeds threshold — TRADING':'Score below \\u00b1'+s.threshold+' threshold — HOLDING')+'</div>';
+      html+='</div>';
+    } else {
+      html+='<div style="color:#888">No scores yet — waiting for market data</div>';
+    }
+    html+='</div>';
+    /* Open positions */
+    if(s.positions&&s.positions.length>0){
+      html+='<div class="card" style="padding:16px">';
+      html+='<h3 style="color:#4fc3f7;margin:0 0 12px">Open Positions</h3>';
+      html+='<table style="width:100%;font-size:13px"><tr style="color:#888"><th>Market</th><th>Side</th><th>Outcome</th><th>Entry</th><th>Size</th><th>Hold Time</th></tr>';
+      for(const p of s.positions){
+        const holdMin=((Date.now()-p.entryTime)/60000).toFixed(1);
+        html+='<tr><td>'+p.marketId+'</td><td>'+p.side+'</td><td>'+p.outcome+'</td><td>$'+p.entryPrice.toFixed(3)+'</td><td>'+p.size+'</td><td>'+holdMin+' min</td></tr>';
+      }
+      html+='</table></div>';
+    }
+    el.innerHTML=html;
+  }catch(e){el.innerHTML='<p style="color:#f66">Error loading: '+e.message+'</p>';}
+}
+
+/* Start/stop polling when tab changes */
+document.querySelectorAll('.tab-btn').forEach(btn=>{
+  btn.addEventListener('click',()=>{
+    if(btn.dataset.tab==='btc15m-live') startBtc15mPolling();
+    else stopBtc15mPolling();
+  });
+});
 
 /* ─── Boot ─── */
 fetchDashboardData();

@@ -24,7 +24,7 @@ export interface ExecutionWallet {
 export class WalletManager {
   private readonly wallets = new Map<string, ExecutionWallet>();
 
-  registerWallet(config: WalletConfig, assignedStrategy: string, enableLive: boolean): void {
+  registerWallet(config: WalletConfig, assignedStrategy: string, enableLive: boolean, savedState?: WalletState): void {
     if (this.wallets.has(config.id)) {
       throw new Error(`Wallet ${config.id} already registered`);
     }
@@ -39,7 +39,7 @@ export class WalletManager {
 
     const wallet =
       config.mode === 'LIVE'
-        ? new PolymarketWallet(config, assignedStrategy)
+        ? new PolymarketWallet(config, assignedStrategy, savedState)
         : new PaperWallet(config, assignedStrategy);
 
     this.wallets.set(config.id, wallet);
