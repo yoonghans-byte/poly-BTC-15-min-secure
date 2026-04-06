@@ -1,7 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { OrderRouter } from '../src/execution/order_router';
 import { RiskEngine } from '../src/risk/risk_engine';
-import { KillSwitch } from '../src/risk/kill_switch';
 import { TradeExecutor } from '../src/execution/trade_executor';
 import { WalletManager } from '../src/wallets/wallet_manager';
 import { OrderRequest, WalletState } from '../src/types';
@@ -46,7 +45,8 @@ describe('OrderRouter', () => {
   const stub = new StubWallet(walletState);
   manager.registerExternalWallet(walletState.walletId, stub);
 
-    const router = new OrderRouter(manager, new RiskEngine(new KillSwitch()), new TradeExecutor());
+    const mockKillSwitch = { isActive: () => false, activate: () => {}, deactivate: () => {} } as any;
+    const router = new OrderRouter(manager, new RiskEngine(mockKillSwitch), new TradeExecutor());
 
     const order: OrderRequest = {
       walletId: walletState.walletId,
