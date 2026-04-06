@@ -110,6 +110,8 @@ export class Btc15mStrategy extends BaseStrategy {
   private positions: Btc15mPosition[] = [];
   /** Markets we've already traded — no re-entry after exit */
   private tradedMarkets = new Set<string>();
+  /** Markets that exited via signal reversal — allowed re-entry in opposite direction */
+  private reversalExitMarkets = new Set<string>();
   private _lastScores: Btc15mLiveState['scores'] = null;
   private _lastDecision: Btc15mLiveState['decision'] = 'WAITING FOR CANDLES';
   private _lastMarket: Btc15mLiveState['activeMarket'] = null;
@@ -202,10 +204,20 @@ export class Btc15mStrategy extends BaseStrategy {
       return [];
     }
 
-    // Already holding a position or already traded this market
-    if (this.positions.some((p) => p.marketId === market.marketId) || this.tradedMarkets.has(market.marketId)) {
+    // Already holding a position in this market — skip
+    if (this.positions.some((p) => p.marketId === market.marketId)) {
       this._lastDecision = score > 0 ? 'BUY YES (UP)' : 'BUY NO (DOWN)';
       return [];
+    }
+
+    // Already traded this market — allow re-entry only after a signal-reversal exit.
+    if (this.tradedMarkets.has(market.marketId)) {
+      if (!this.reversalExitMarkets.has(market.marketId)) {
+        this._lastDecision = score > 0 ? 'BUY YES (UP)' : 'BUY NO (DOWN)';
+        return [];
+      }
+      this.reversalExitMarkets.delete(market.marketId);
+      logger.info({ marketId: market.marketId, score, market: market.slug }, 'btc15m: flipping position after signal reversal');
     }
 
     this._lastDecision = score > 0 ? 'BUY YES (UP)' : 'BUY NO (DOWN)';
@@ -332,6 +344,26 @@ export class Btc15mStrategy extends BaseStrategy {
       if (!shouldExit && holdingMin > params.maxHoldMinutes) shouldExit = true;
       // Exit if market is about to expire
       if (!shouldExit && !this.hasEnoughTimeRemaining(market)) shouldExit = true;
+
+      // Signal-reversal exit: if the score has flipped strongly in the
+      // opposite direction, exit now — whether at a profit or a loss.
+      // Holding YES (UP) → exit if score < -threshold (strong DOWN)
+      // Holding NO (DOWN) → exit if score > +threshold (strong UP)
+      if (!shouldExit && this._lastScores) {
+        const score = this._lastScores.total;
+        const reversed =
+          (pos.outcome === 'YES' && score <= -params.scoreThreshold) ||
+          (pos.outcome === 'NO' && score >= params.scoreThreshold);
+        if (reversed) {
+          logger.info(
+            { marketId: pos.marketId, outcome: pos.outcome, score, threshold: params.scoreThreshold, edgeBps: Math.round(edgeBps) },
+            'btc15m: signal reversal — exiting position',
+          );
+          shouldExit = true;
+          // Allow one re-entry in the opposite direction
+          this.reversalExitMarkets.add(pos.marketId);
+        }
+      }
 
       if (shouldExit) {
         toRemove.push(i);
